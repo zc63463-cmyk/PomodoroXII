@@ -53,5 +53,8 @@ describe('resolveTimerError', () => {
     expect(resolveTimerError({ response: { data: { code: 'stale_session_owner' } } }).code).toBe('stale_session_owner')
     expect(resolveTimerError({ response: { data: { code: 'blocked_conflict' } } }).code).toBe('blocked_conflict')
     expect(resolveTimerError(new Error('active_session_exists:space-a:space-a')).code).toBe('active_session_exists')
+    const notOwned = resolveTimerError(new Error('active_session_not_owned'))
+    expect(notOwned.code).toBe('active_session_not_owned')
+    expect(notOwned.message).toContain('在本标签页接管')
   })
 })

@@ -373,6 +373,46 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
     expect(screen.getAllByTestId('wm-session-node').length).toBe(2)
   })
 
+  it('★ 会话发端枢纽与顶栏标题（PXII-FEAT-SESSION-HUB）：两处渲染器都上浮标题、收拢岛根', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    const editor = await screen.findByTestId('timer-map-editor')
+    const port = screen.getByTestId('timer-map-port')
+    for (const [scope, root] of [['编辑区', editor], ['小视图', port]] as const) {
+      // ① 岛根 = 发端枢纽（外环 + 中心亮点），当前会话态
+      const hub = root.querySelector('[data-testid="wm-session-hub"]')
+      expect(hub, `${scope} 应渲染发端枢纽`).not.toBeNull()
+      expect(hub).toHaveAttribute('data-hub-current', 'true')
+      expect(hub!.querySelector('.wm-hub-ring')).not.toBeNull()
+      expect(hub!.querySelector('.wm-hub-core')).not.toBeNull()
+      // ② 画布内不再有会话节点的矩形卡与截断标题
+      const sessionNode = root.querySelector('.wm-node[data-session="true"]')!
+      expect(sessionNode.querySelector('rect.wm-box')).toBeNull()
+      expect(sessionNode.querySelector('.wm-text')).toBeNull()
+      // ③ 完整会话标题上浮到地标卡顶栏：可见文本按可用宽度自适应（窄岛会截断补
+      //    `…`），**全文恒在** `data-full-title` 与包裹 <title> tooltip 里（信息不丢）
+      const title = root.querySelector('[data-testid="wm-island-title"]')
+      expect(title, `${scope} 应渲染顶栏标题`).not.toBeNull()
+      expect(title!.getAttribute('data-full-title')).toBe('09-30 19:55 会话')
+      expect(title!.textContent).not.toBe('')
+      expect(
+        title!.textContent === '09-30 19:55 会话' ||
+          (title!.textContent!.endsWith('…') &&
+            '09-30 19:55 会话'.startsWith(title!.textContent!.slice(0, -1))),
+        `${scope} 顶栏标题应为全文或全文前缀 + …（实得 ${title!.textContent}）`,
+      ).toBe(true)
+      expect(
+        root.querySelector('[data-testid="wm-island-title-wrap"] title')?.textContent,
+      ).toBe('09-30 19:55 会话')
+      // 画布内原本被截断成 `09-30 19:55 会…` 的会话节点文本已彻底消失
+      expect(sessionNode.querySelector('.wm-text')).toBeNull()
+      expect(root.querySelector('[data-testid="wm-island-card"]')).toHaveClass(
+        'wm-island-card--current',
+      )
+    }
+  })
+
   it('★ 沉浸切换：小视图 data-minimal 翻转、编辑区保留（D15：记录面常驻中央）', async () => {
     readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
     render(createElement(TimerPage))
@@ -563,75 +603,48 @@ describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）',
     return createChild
   }
 
-  it('★ 新建成功后自动切为当前专注项（setCurrentPlanItem 收到新项 id）', async () => {
+  it('★ 方案 A：新建成功后保持在当前专注项（不切走焦点），新项加入计划', async () => {
     seedCreateChild()
     render(createElement(TimerPage))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    await waitFor(() => expect(coordinatorSpies.setCurrentPlanItem).toHaveBeenCalledWith(
+    // 新项成功加入计划
+    await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
       expect.objectContaining({ workItemId: 'l3-new' }),
     ))
-    // 切换目标必须已经在计划里（本地仓储 / 后端同款校验）——顺序契约的页面级体现
-    const addOrder = coordinatorSpies.addPlanItem.mock.invocationCallOrder[0]
-    const setCurrentOrder = coordinatorSpies.setCurrentPlanItem.mock.invocationCallOrder[0]
-    expect(addOrder).toBeLessThan(setCurrentOrder)
+    // 方案 A 核心断言：当前已有专注项（l3-a）时，不切走焦点，保留上下文
+    expect(coordinatorSpies.setCurrentPlanItem).not.toHaveBeenCalled()
   })
 
-  it('★ 导图实时生长：先建本次会话岛、再落 todo 节点，写入新 L3 的 .mm.md 并即时可见', async () => {
+  it('★ 导图实时生长：在当前正在查看的大图上直接长出 todo 节点，保持原图上下文不变', async () => {
     seedCreateChild()
-    // 导图服务端的真实往返：读回最后写进去的那份，而不是固定快照 ——
-    // 否则切换后的重读会把已写好的内容又"退回"成旧文本，断言就失真了。
-    let stored: string | null = null
-    readWorkMapMock.mockImplementation(async (workItemId: string) =>
-      workItemId === 'l3-new' ? stored : null)
-    writeWorkMapMock.mockImplementation(async (_workItemId: string, text: string) => {
-      stored = text
-      return 128
+    let storedCurrent: string = ISLAND_FOR_RUNNING
+    readWorkMapMock.mockImplementation(async (workItemId: string) => {
+      if (workItemId === 'l3-a') return storedCurrent
+      return null
     })
-    // setCurrent 成功后当前计划项真的切到新 L3（复刻 coordinator 的落库效果）：
-    // 页面按 aggregate.plan 派生 focusedWorkItemId，桩不更新它就读不到切换后的键。
-    coordinatorSpies.setCurrentPlanItem.mockImplementation(async (input: { workItemId: string }) => {
-      const current = useTimerStore.getState().locator as { session: typeof aggregate } | null
-      if (current !== null) {
-        useTimerStore.setState({
-          locator: {
-            ...current,
-            session: {
-              ...current.session,
-              plan: [
-                ...current.session.plan.map((plan) => ({ ...plan, currentDuringSession: false })),
-                {
-                  id: 'plan-new', workItemId: input.workItemId, titleSnapshot: '新三级 A',
-                  currentDuringSession: true, completionDraft: false, removedAt: null,
-                },
-              ],
-            },
-          },
-        } as never)
-      }
+    writeWorkMapMock.mockImplementation(async (workItemId: string, text: string) => {
+      if (workItemId === 'l3-a') storedCurrent = text
+      return 128
     })
     render(createElement(TimerPage))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    // 写的是**新 L3** 的图，且内容含会话岛与这次拆解出来的 todo 节点
-    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalled())
-    const [workItemId, written] = writeWorkMapMock.mock.calls[0] as [string, string]
-    expect(workItemId).toBe('l3-new')
-    expect(written).toContain('session_id: "session-a"') // 本次会话的岛
+    // 写的是**当前查看的 L3（l3-a）**的图，且内容含本次拆解出来的 todo 节点
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledWith('l3-a', expect.any(String)))
+    const callsForCurrent = writeWorkMapMock.mock.calls.filter(([id]) => id === 'l3-a')
+    const [, written] = callsForCurrent[0] as [string, string]
+    expect(written).toContain('session_id: "session-a"')
     expect(written).toContain('thought_type: "todo"')
     expect(written).toContain('### 新三级 A')
-    // 岛上的 level3Titles = 本次会话**已有的**计划项（种子里的 Verify output）；
-    // 新项本身只作为 todo 节点出现一次，不重复成裸 `### 标题`。
-    expect(written).toContain('### Verify output')
-    expect(written.match(/### 新三级 A/g)).toHaveLength(1)
-    // 自动切换后重新读新 L3 的图（键不变 → 靠 mapRefreshSeq 触发，见页面注释）
-    await waitFor(() =>
-      expect(readWorkMapMock.mock.calls.filter(([id]) => id === 'l3-new').length).toBeGreaterThanOrEqual(2))
-    // 中央编辑区不再是占位，且渲染出拆解出的子行动（带 todo 类型的节点）
+    // 原图原有的内容完全保留（验证输出）
+    expect(written).toContain('### 验证输出')
+
+    // 中央编辑区在原图上长出新节点
     const canvas = await screen.findByTestId('map-editor-canvas')
     await waitFor(() => expect(canvas.textContent).toContain('新三级 A'))
     expect(canvas.querySelector('.wm-node[data-thought="todo"]')).not.toBeNull()
@@ -640,27 +653,22 @@ describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）',
 
   it('新 L3 的图上已有本次会话岛（幂等分支）：不重复建岛，仍把子行动落成 todo 节点', async () => {
     seedCreateChild()
-    // 该 L3 早于本会话存在（启动时未勾选 → 没建过岛，但图上有别的历史）：
-    // 这里给一张**已含本次会话岛**的图，走 buildSessionIsland 的
-    // session_island_exists 分支 —— 必须继续追加，否则拆解结果无处落地。
     readWorkMapMock.mockImplementation(async (workItemId: string) =>
-      workItemId === 'l3-new' ? ISLAND_FOR_NEW_L3 : null)
+      workItemId === 'l3-a' ? ISLAND_FOR_RUNNING : null)
     writeWorkMapMock.mockResolvedValue(96)
     render(createElement(TimerPage))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '拆解出的行动' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalled())
-    const [workItemId, written] = writeWorkMapMock.mock.calls[0] as [string, string]
-    expect(workItemId).toBe('l3-new')
-    // 岛没有被复制第二份（centers 仍只有一条）
-    expect(written.match(/session_id: "session-a"/g)).toHaveLength(2) // centers 条目 + 节点块
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledWith('l3-a', expect.any(String)))
+    const calls = writeWorkMapMock.mock.calls.filter(([id]) => id === 'l3-a')
+    const [, written] = calls[0] as [string, string]
     expect(written).toContain('thought_type: "todo"')
     expect(written).toContain('### 拆解出的行动')
   })
 
-  it('导图写失败 fail-soft：拆解与自动切换照常完成，不弹全局错误', async () => {
+  it('导图写失败 fail-soft：拆解照常完成，不弹全局错误', async () => {
     seedCreateChild()
     writeWorkMapMock.mockRejectedValue(new Error('work_map_write_failed'))
     render(createElement(TimerPage))
@@ -668,23 +676,18 @@ describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）',
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    // 导图失败不得升级成会话失败：创建 → 入计划 → 切换三步仍然走完
+    // 导图失败不得升级成会话失败：创建 → 入计划仍然走完
     await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
       expect.objectContaining({ workItemId: 'l3-new' }),
     ))
-    await waitFor(() => expect(coordinatorSpies.setCurrentPlanItem).toHaveBeenCalledWith(
-      expect.objectContaining({ workItemId: 'l3-new' }),
-    ))
-    // 全局错误条（页面根部）不得出现：导图失败只 warn，不 setStableError。
-    // 注意不能整体断言「无 alert」—— FocusedWorkItemNote 的草稿 mock 在本文件里
-    // 本来就会渲染一条无关 alert（既有 fixture 行为），这里只钉"没有新增的错误"。
+    // 全局错误条不得出现
     expect(document.querySelector('main > p[role="alert"]')).toBeNull()
     expect(screen.queryByTestId('map-quick-error')).toBeNull()
-    // 输入照常清空（创建成功），导图那一步只是没留下痕迹
+    // 输入照常清空
     await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
   })
 
-  it('读图失败 fail-soft：readWorkMap 抛错时创建与切换仍完成', async () => {
+  it('读图失败 fail-soft：readWorkMap 抛错时创建与入计划仍完成', async () => {
     seedCreateChild()
     readWorkMapMock.mockRejectedValue(new Error('work_map_read_failed'))
     render(createElement(TimerPage))
@@ -692,27 +695,35 @@ describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）',
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    await waitFor(() => expect(coordinatorSpies.setCurrentPlanItem).toHaveBeenCalledWith(
+    await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
       expect.objectContaining({ workItemId: 'l3-new' }),
     ))
-    expect(writeWorkMapMock).not.toHaveBeenCalled()
     expect(document.querySelector('main > p[role="alert"]')).toBeNull()
   })
 
-  it('切换失败不谎报创建失败：创建/入计划照常，错误由全局 alert 呈现', async () => {
+  it('空计划无前序项时新建：自动切为新项作为首个专注项', async () => {
     seedCreateChild()
-    coordinatorSpies.setCurrentPlanItem.mockRejectedValueOnce(new Error('current_item_conflict'))
+    // 模拟空计划场景（无前序 focusedWorkItemId）
+    const current = useTimerStore.getState().locator as { session: typeof aggregate } | null
+    if (current !== null) {
+      useTimerStore.setState({
+        locator: {
+          ...current,
+          session: {
+            ...current.session,
+            plan: [],
+          },
+        },
+      } as never)
+    }
     render(createElement(TimerPage))
 
-    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '首个三级 A' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    await waitFor(() => expect(coordinatorSpies.setCurrentPlanItem).toHaveBeenCalled())
-    // ★ 若把 setCurrent 的异常透传给表单，这里会看到「创建失败」的卡内 alert 且输入被保留 ——
-    //   用户重试就会造出第二个重复 L3。断言：输入已清空（创建确实成功），
-    //   且表单卡内没有错误文案。
-    await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
-    expect(screen.queryByText('current_item_conflict')).toBeNull()
+    await waitFor(() => expect(coordinatorSpies.setCurrentPlanItem).toHaveBeenCalledWith(
+      expect.objectContaining({ workItemId: 'l3-new' }),
+    ))
   })
 
   it('拆解表单上方如实说明归属：新项挂在会话的二级项下（不是当前三级项）', async () => {

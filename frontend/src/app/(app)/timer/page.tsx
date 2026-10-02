@@ -542,13 +542,74 @@ export default function TimerPage() {
       }
 
       await writeWorkMap(workItemId, appended.text)
-      // 立即反映：拆解后 setCurrent 会把当前项切到新 L3，带键缓存让编辑区/小视图
-      // 直接拿到最终文本，不必等下一次读回（键不匹配时 getter 不会取用它）。
-      setSessionMap({ workItemId, text: appended.text })
+      // 仅在当前项与目标匹配时更新缓存，避免后台写新图污染当前图的缓存
+      if (focusedWorkItemId === workItemId) {
+        setSessionMap({ workItemId, text: appended.text })
+      }
       return appended.text
     } catch (cause) {
       console.warn(
         `[timer-map-grow] 新 L3 ${workItemId} 的导图生长失败（fail-soft，不阻断拆解）: ${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+      return null
+    }
+  }
+
+  /**
+   * 方案 A（保持在原图生长，不自动切换）：
+   * 把拆解出的子行动作为 todo 待办节点，直接追加到**当前正在查看的导图**的会话岛下。
+   * 保留当前导图内所有已有的思考、注释和上下文，不强行切走焦点。
+   */
+  const appendTodoToCurrentMap = async (
+    currentId: string,
+    todoTitle: string,
+  ): Promise<string | null> => {
+    if (activeSessionId === null) return null
+    try {
+      const existing = (sessionMap?.workItemId === currentId && sessionMap.text !== null
+        ? sessionMap.text
+        : await readWorkMap(currentId)) ?? ''
+
+      const currentItem = workItems.find((w) => w.id === currentId)
+      const currentTitle = currentItem?.title ?? '当前工作项'
+      const startedAt = new Date(aggregate?.session.startedAt ?? '')
+      const siblingTitles = plans
+        .map((plan) => plan.titleSnapshot)
+        .filter((title) => title.trim() !== '' && title !== todoTitle)
+      const island = buildSessionIsland(existing, {
+        sessionId: activeSessionId,
+        workItemTitle: currentTitle,
+        sessionTitle: formatSessionIslandTitle(
+          Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
+        ),
+        level3Titles: siblingTitles,
+        dir: 'right',
+      })
+      if (!island.changed && island.reason !== 'session_island_exists') {
+        console.warn(
+          `[timer-map-grow] 当前图 ${currentId} 建岛未产生变更（${island.reason ?? 'unchanged'}），跳过节点追加`,
+        )
+        return null
+      }
+
+      const appended = appendThoughtNode(island.text, {
+        sessionId: activeSessionId,
+        type: 'todo',
+        title: todoTitle,
+      })
+      if (!appended.changed) {
+        console.warn(
+          `[timer-map-grow] 当前图 ${currentId} 追加 todo 节点未产生变更（${appended.reason ?? 'unchanged'}）`,
+        )
+        return null
+      }
+
+      await writeWorkMap(currentId, appended.text)
+      setSessionMap({ workItemId: currentId, text: appended.text })
+      return appended.text
+    } catch (cause) {
+      console.warn(
+        `[timer-map-grow] 当前图 ${currentId} 生长 todo 节点失败（fail-soft）: ${cause instanceof Error ? cause.message : String(cause)}`,
       )
       return null
     }
@@ -1024,22 +1085,26 @@ export default function TimerPage() {
     //   切换目标已在计划内（focus-session-repository.ts:1331 `session_plan_item_not_found`；
     //   后端 policy 同款 not_found 校验），反序必被拒。
     await addPlanItem(created.id)
-    // 导图生长（fail-soft，见 growMapForNewLevel3）必须在 setCurrent **之前**完成：
-    //   切换后读图 effect 会立刻为新 L3 拉一次导图，若那次读落在写入之前，用户会先
-    //   看到一次「还没有导图记录」再跳成有岛 —— 顺序对了就只有最终态这一帧。
-    const grown = await growMapForNewLevel3(created.id, created.title, created.title)
-    try {
-      // 自动切为当前专注项：拆解出的子行动就是下一步要投入的东西。
-      // 失败**不 rethrow** —— setCurrent 内部已 setStableError（全局 error 由页面
-      // 顶部 role=alert 呈现），再往上抛会让 SessionWorkspace 把"已创建成功"谎报成
-      // 创建失败，用户重试就会多出一个重复的 L3。
-      await setCurrent(created.id)
-    } catch {
-      // 已由 setCurrent 上报（全局 error 呈现）；此处只吞掉，避免误报创建失败。
+    // 方案 A（保持在原图生长，不自动切换）：
+    // 1) 若当前已有专注项（currentFocusedId），直接在当前正在看的大图上长出 todo 待办分支；
+    //    保留所有已有节点、思考与注释上下文，不跳出当前画面；
+    // 2) 静默为新创建的 L3 初始化专属导图（带会话岛），供用户后续主动在右栏点击切换时使用；
+    // 3) 若此前没有专注项（如启动时未选三级项），才切为当前项。
+    const currentFocusedId = focusedWorkItemId
+    let grown: string | null = null
+
+    if (currentFocusedId) {
+      grown = await appendTodoToCurrentMap(currentFocusedId, created.title)
+      void growMapForNewLevel3(created.id, created.title, created.title).catch(() => null)
+    } else {
+      grown = await growMapForNewLevel3(created.id, created.title, created.title)
+      try {
+        await setCurrent(created.id)
+      } catch {
+        // 已由 setCurrent 上报（全局 error 呈现）；此处只吞掉，避免误报创建失败。
+      }
     }
-    // 端口刷新自增是**必需项**：空计划场景下 focusedWorkItemId 在 setCurrent 之前
-    // 就已经指向新 L3（createChild 会改写 selectedWorkItemId），键没变则读图 effect
-    // 不会重跑，不 bump 就永远停在占位文案上。
+
     if (grown !== null) setMapRefreshSeq((seq) => seq + 1)
   }
 
