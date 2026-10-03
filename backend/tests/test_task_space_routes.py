@@ -65,6 +65,7 @@ class TestTaskSpaceRoutePresence:
         assert "post" in paths["/api/v1/work-items"]
         assert "/api/v1/work-items/{work_item_id}" in paths
         assert "/api/v1/work-items/{work_item_id}/move" in paths
+        assert "/api/v1/work-items/{work_item_id}/reorder" in paths
         assert "/api/v1/work-items/{work_item_id}/transition" in paths
 
     def test_openapi_contains_note_routes_with_correct_methods(self) -> None:

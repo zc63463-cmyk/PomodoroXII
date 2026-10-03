@@ -53,6 +53,7 @@ import {
 } from '@/lib/task-space/relation-selectors'
 import { evaluateSessionLaunch } from '@/lib/task-space/session-launch-guard'
 import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
+import { siblingReorderRank } from '@/lib/task-space/sibling-reorder'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
 import {
   countOpenChildren,
@@ -635,6 +636,37 @@ export default function TasksPage() {
     void moveWorkItem(workItemId, newParentId).catch(() => undefined)
   }, [moveWorkItem])
 
+  // ★ 工单②：同层拖拽排序。同父一次 reorder 到位；跨父拆两步（先 move
+  //   append 到目标父 —— 树校验服务端权威、失败即止；再 reorder 到位次）。
+  //   rank 的换算（「去掉自己之后」的插入位次）在 sibling-reorder.ts 纯函数。
+  const handleTreeReorder = useCallback(async (workItemId: string, targetId: string, position: 'before' | 'after') => {
+    const snapshot = useTaskSpaceStore.getState()
+    const drag = snapshot.workItems.find((item) => item.id === workItemId)
+    const target = snapshot.workItems.find((item) => item.id === targetId)
+    if (!drag || !target) return
+    const dragParent = drag.parentId ?? null
+    const targetParent = target.parentId ?? null
+    const siblingsUnder = (parentId: string | null) => (
+      snapshot.workItems.filter((item) => (item.parentId ?? null) === parentId)
+    )
+    if (dragParent === targetParent) {
+      const rank = siblingReorderRank(siblingsUnder(targetParent), workItemId, targetId, position)
+      await snapshot.reorderWorkItem(workItemId, targetParent, rank).catch(() => undefined)
+      return
+    }
+    try {
+      await snapshot.moveWorkItem(workItemId, targetParent)
+    } catch {
+      return
+    }
+    const latest = useTaskSpaceStore.getState()
+    const movedRow = latest.workItems.find((item) => item.id === workItemId)
+    if (!movedRow || (movedRow.parentId ?? null) !== targetParent) return
+    const siblings = latest.workItems.filter((item) => (item.parentId ?? null) === targetParent)
+    const rank = siblingReorderRank(siblings, workItemId, targetId, position)
+    await latest.reorderWorkItem(workItemId, targetParent, rank).catch(() => undefined)
+  }, [])
+
   return (
     <div className="flex min-h-full min-w-0 flex-col">
       {error ? <p role="alert" className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p> : null}
@@ -774,6 +806,7 @@ export default function TasksPage() {
                   pendingMutations={pendingMutations}
                   blockedSignals={blockedSignals}
                   onMove={handleTreeMove}
+                  onReorder={handleTreeReorder}
                   collapseSignal={collapseSignal}
                   filterActive={treeFilterActive}
                   openChildCountById={openChildCountById}

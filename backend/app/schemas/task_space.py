@@ -262,6 +262,30 @@ class MoveWorkItemRequest(WireModel):
     # attempt to smuggle childRank through the external API.)
 
 
+class ReorderWorkItemRequest(WireModel):
+    """Reposition a work item **within its own parent** (sibling reorder).
+
+    ★ 为什么是独立命令而不是给 MoveWorkItem 加 child_rank：Move 的
+      ``extra="forbid"`` + 拒收 childRank 是有意设计 —— 它保护「在线 Move 的
+      rank 由服务端权威分配（append-only）」这一不变量。往 Move 里塞 rank 等
+      于推翻该不变量。先例：``ReorderStatusDefinitionRequest`` +
+      ``POST /{status_id}/reorder`` —— 同样为「用户期望组内拖动」而生。
+    ★ rank 语义与状态 reorder 一致：在**去掉自己之后**的同父兄弟序列中的插入
+      位次（服务端 clamp 到 ``[0, len(rest)]``）。重排是集合级操作，兄弟行的
+      child_rank 一并由服务端重写为 0..n-1；客户端永远不上行 rank 绝对值之外的
+      任何兄弟行状态。
+    ★ parent_id 是 authority guard（必须等于当前父项，None = 根层），换父请走
+      MoveWorkItem（那里有环 / 深度 / 跨项目全套树校验）。
+    """
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parent_id: str | None = Field(default=None, max_length=64)
+    rank: int = Field(ge=0)
+
+
 class TransitionWorkItemRequest(WireModel):
     command_id: CommandId
     space_id: str = Field(min_length=1, max_length=64)

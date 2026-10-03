@@ -101,6 +101,7 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     createWorkItem: vi.fn().mockResolvedValue(workItem('new', 'l2', 3)),
     updateWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     moveWorkItem: vi.fn().mockResolvedValue(workItem('l3', 'l1', 2)),
+    reorderWorkItem: vi.fn().mockResolvedValue(workItem('l3', 'l1', 2)),
     transitionWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     listRelations: vi.fn().mockResolvedValue({ blockers: [], blocking: [] }),
     listBlockedMap: vi.fn().mockResolvedValue({ items: {} }),
@@ -610,6 +611,53 @@ describe('task-space-store mutation lifecycle', () => {
     expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toEqual(moved)
     expect(useTaskSpaceStore.getState().error).toBeNull()
     expect(useTaskSpaceStore.getState().mutationError).toBeNull()
+  })
+
+  it('reorder: calls the repository with server semantics and swaps in the moved row', async () => {
+    const reordered = { ...workItem('l1', null, 1), childRank: 2, version: 2 }
+    const reorderWorkItem = vi.fn().mockResolvedValue(reordered)
+    const refreshOverview = vi.fn().mockResolvedValue({
+      projects: [],
+      workItems: [reordered, workItem('l2', null, 1)],
+      definitions: null,
+      unresolvedDepthItemIds: [],
+    })
+    const repository = repositoryFixture({ reorderWorkItem, refreshOverview })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1), workItem('l2', null, 1)],
+    })
+
+    await useTaskSpaceStore.getState().reorderWorkItem('l1', null, 2)
+    expect(reorderWorkItem).toHaveBeenCalledWith({ workItemId: 'l1', parentId: null, rank: 2 })
+    expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toEqual(reordered)
+    // ★ 工单②：集合级操作后权威重拉 —— 兄弟行 rank/version 由服务端重写。
+    expect(refreshOverview).toHaveBeenCalledTimes(1)
+    expect(useTaskSpaceStore.getState().workItems.map((item) => item.id)).toEqual(['l1', 'l2'])
+    expect(useTaskSpaceStore.getState().mutationError).toBeNull()
+  })
+
+  it('reorder: a failed overview refresh does not fail the already-accepted mutation', async () => {
+    const reordered = { ...workItem('l1', null, 1), childRank: 1, version: 2 }
+    const reorderWorkItem = vi.fn().mockResolvedValue(reordered)
+    const refreshOverview = vi.fn().mockRejectedValue(new Error('network gone'))
+    const repository = repositoryFixture({ reorderWorkItem, refreshOverview })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
+    })
+
+    await expect(useTaskSpaceStore.getState().reorderWorkItem('l1', null, 1)).resolves.toEqual(reordered)
+    expect(useTaskSpaceStore.getState().mutationError).toBeNull()
+  })
+
+  it('reorder: maps a version_conflict rejection onto the moved row', async () => {
+    const reorderWorkItem = vi.fn().mockRejectedValue(axiosError(409, 'version_conflict'))
+    const repository = repositoryFixture({ reorderWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
+    })
+
+    await expect(useTaskSpaceStore.getState().reorderWorkItem('l1', null, 0)).rejects.toThrow()
+    expect(useTaskSpaceStore.getState().mutationError).toEqual({ targetId: 'l1', code: 'version_conflict' })
   })
 
   it('preserves the prior item and maps a stable code on failure', async () => {

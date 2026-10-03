@@ -30,6 +30,7 @@ from app.schemas.task_space import (
     CreateWorkItemRequest,
     MoveWorkItemRequest,
     RemoveWorkItemLabelsRequest,
+    ReorderWorkItemRequest,
     RestoreWorkItemRequest,
     TaskSpaceAcceptedResponse,
     TransitionWorkItemRequest,
@@ -267,6 +268,41 @@ async def move_work_item(
             "operation": "move",
             "project_id": body.project_id,
             "new_parent_id": body.parent_id,
+        },
+    )
+    outcome = await command_module.execute(scope, command)
+    return await _map_work_item_outcome(outcome, scope, query_module)
+
+
+@router.post(
+    "/{work_item_id}/reorder", response_model=TaskSpaceAcceptedResponse
+)
+async def reorder_work_item(
+    work_item_id: str,
+    body: ReorderWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    command_module=Depends(get_task_space_command_module),
+    query_module=Depends(get_task_space_query_module),
+    scope=Depends(get_space_runtime_handle),
+) -> TaskSpaceAcceptedResponse:
+    """Reposition a work item within its own parent (sibling reorder).
+
+    ★ 集合级操作：rank 是「去掉自己之后」的兄弟序列插入位次，兄弟行的
+      child_rank 由服务端一并重写为 0..n-1。parent_id 是 authority guard
+      （必须等于当前父项）；换父仍走 POST /{work_item_id}/move。
+    """
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
+    command = MutateWorkItem(
+        command_id=body.command_id,
+        space_id=body.space_id,
+        work_item_id=work_item_id,
+        expected_version=body.expected_version,
+        payload_hash=body.payload_hash,
+        payload={
+            "operation": "reorder",
+            "parent_id": body.parent_id,
+            "rank": body.rank,
         },
     )
     outcome = await command_module.execute(scope, command)

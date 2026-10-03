@@ -53,6 +53,14 @@ export interface MoveWorkItemInput {
   newParentId: string | null
 }
 
+/** ★ 工单②：同父内重排。parentId 是 authority guard；rank 是服务端语义的
+ *   「去掉自己之后」插入位次（换算见 lib/task-space/sibling-reorder.ts）。 */
+export interface ReorderWorkItemInput {
+  workItemId: string
+  parentId: string | null
+  rank: number
+}
+
 export interface TransitionWorkItemInput {
   workItemId: string
   statusDefinitionId: string
@@ -399,6 +407,18 @@ export class TaskSpaceRepository {
       .then((result) => result.workItem)
   }
 
+  async reorderWorkItem(input: ReorderWorkItemInput) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.workItems.get(input.workItemId)
+    if (!cached) throw new Error('work_item_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'reorder_work_item', spaceId: this.spaceId, targetId: input.workItemId,
+      request: { ...input, expectedVersion: (cached as CachedWorkItem).version, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeWorkItemIntent(intent, (request) => this.api.reorderWorkItem(request as never))
+      .then((result) => result.workItem)
+  }
+
   async updateWorkItem(input: {
     workItemId: string
     title?: string
@@ -607,6 +627,9 @@ export class TaskSpaceRepository {
       create_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.createWorkItem(request as never)).then(() => undefined) },
       update_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.updateWorkItem(request as never)).then(() => undefined) },
       move_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.moveWorkItem(request as never)).then(() => undefined) },
+      // ★ 工单②：重放映射 —— 少注册一个，崩溃恢复时该 intent 会落到 unknown
+      //   分支被标 failed（同 move_work_item / status 四命令的教训）。
+      reorder_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.reorderWorkItem(request as never)).then(() => undefined) },
       transition_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.transitionWorkItem(request as never)).then(() => undefined) },
       trash_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.trashWorkItem(request as never)).then(() => undefined) },
       restore_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.restoreWorkItem(request as never)).then(() => undefined) },

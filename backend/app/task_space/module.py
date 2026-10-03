@@ -39,6 +39,9 @@ WORK_ITEM_REQUEST_NAMES = {
     "update": "UpdateWorkItem",
     "move": "MoveWorkItem",
     "transition": "TransitionWorkItem",
+    # 工单②：同父内拖拽排序 —— 集合级重排（先例 status 的 reorder），与 Move
+    # 的 append-only 分配器语义分离；见 _compile_ReorderWorkItem 注释。
+    "reorder": "ReorderWorkItem",
     # archived_at lifecycle: the caller never supplies the timestamp, so the
     # business payload is empty and the server stamps its own monotonic clock.
     "trash": "TrashWorkItem",

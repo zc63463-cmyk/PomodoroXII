@@ -15,6 +15,8 @@ const INTENT_KIND_LABELS: Record<string, string> = {
   create_work_item: '新建工作项',
   update_work_item: '编辑工作项',
   move_work_item: '移动工作项',
+  // ★ 工单②：同层拖拽排序。
+  reorder_work_item: '调整排序',
   transition_work_item: '切换状态',
   trash_work_item: '删除工作项',
   restore_work_item: '恢复工作项',

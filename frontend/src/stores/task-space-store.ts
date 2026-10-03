@@ -86,6 +86,12 @@ export interface TaskSpaceRepositoryLike {
     workItemId: string
     newParentId: string | null
   }) => Promise<CachedWorkItem>
+  // ★ 工单②：同父内重排（集合级；服务端重写兄弟行 child_rank）。
+  reorderWorkItem: (input: {
+    workItemId: string
+    parentId: string | null
+    rank: number
+  }) => Promise<CachedWorkItem>
   transitionWorkItem: (input: {
     workItemId: string
     statusDefinitionId: string
@@ -222,6 +228,8 @@ export interface TaskSpaceActions {
     dueAt?: string | null
   }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null) => Promise<CachedWorkItem>
+  /** ★ 工单②：同层拖拽排序（parentId 必须是当前父项；rank 为服务端语义插入位次）。 */
+  reorderWorkItem: (workItemId: string, parentId: string | null, rank: number) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>
   /** Soft-delete / undo.  Both are idempotent server side. */
   trashWorkItem: (workItemId: string) => Promise<CachedWorkItem>
@@ -331,6 +339,12 @@ const MUTATION_ERROR_MESSAGES: Record<string, string> = {
   // --- notes ---
   invalid_note_document: '笔记内容格式不合法，请检查后重试。',
   unsupported_content_version: '内容版本不受支持，请更新后重试。',
+  // ★ 2026-10-03（接手欠账补登记）：状态双轴阶段 3 在后端 errors.py 登记了
+  //   这三个稳定码，但映射表漏了 —— 完备性守卫 task-space-error-codes.test.ts
+  //   会以「missing」失败（接手时即红，与本单改动无关；证据见报告）。
+  status_name_conflict: '该状态下已有同名状态，请换个名称。',
+  status_definition_in_use: '该状态仍被工作项使用，先迁移后再归档或删除。',
+  status_definition_archived: '该状态已归档，无法再被使用。',
   // --- focus-session coupling ---
   active_session_exists: '已有进行中的专注会话，请先结束后再操作。',
   stale_session_owner: '专注会话归属已失效，请刷新后重试。',
@@ -1280,6 +1294,38 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             mutationError: null,
           }))
           return moved
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(workItemId)
+        }
+      },
+
+      async reorderWorkItem(workItemId, parentId, rank) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const reordered = await repository.reorderWorkItem({ workItemId, parentId, rank })
+          set((current) => ({
+            workItems: current.workItems.map((candidate) => candidate.id === reordered.id ? reordered : candidate),
+            error: null,
+            mutationError: null,
+          }))
+          // ★ 工单②：reorder 是集合级操作 —— 回执只含被移动行，兄弟行的
+          //   child_rank/version 也被服务端重写了。权威重拉一次，保证本地序
+          //   与服务器一致（含「位置未变不写」导致的精确 version 差异）。
+          //   重拉失败不回滚主操作（已成功），交给后续 sync pull 收敛。
+          try {
+            const remote = await repository.refreshOverview()
+            const currentSpaceId = get().spaceId
+            if (currentSpaceId !== null && isCurrent(get(), currentSpaceId)) {
+              set({ workItems: remote.workItems })
+            }
+          } catch { /* 收敛交给 pull */ }
+          return reordered
         } catch (error) {
           const mapped = resolveTaskSpaceMutationError(error)
           set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })

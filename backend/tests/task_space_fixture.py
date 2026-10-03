@@ -220,6 +220,33 @@ class TaskSpaceFixture:
         )
         return await self.module.execute(self.scope, command)
 
+    async def reorder_work_item(
+        self,
+        work_item_id: str,
+        parent_id: str | None,
+        rank: int,
+        command_id: str,
+        *,
+        expected_version: int | None = None,
+    ):
+        current = await self.read_work_item(work_item_id)
+        # Same-parent sibling reorder: parent_id is the authority guard; rank
+        # is the insertion index among the remaining siblings.
+        business = {"parent_id": parent_id, "rank": rank}
+        command = MutateWorkItem(
+            command_id=command_id,
+            space_id=self.space_id,
+            work_item_id=work_item_id,
+            expected_version=(
+                int(current["version"])
+                if expected_version is None
+                else expected_version
+            ),
+            payload_hash=canonical_payload_hash(business),
+            payload={"operation": "reorder", **business},
+        )
+        return await self.module.execute(self.scope, command)
+
     def status_id(self, category: str) -> str:
         return SYSTEM_STATUS_IDS[category]
 

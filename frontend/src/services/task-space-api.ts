@@ -8,6 +8,10 @@ export interface CreateProjectInput extends SpaceCommandBase { name: string; key
 export interface CreateWorkItemInput extends SpaceCommandBase { projectId: string; title: string; description: string | null; parentId: string | null; typeDefinitionId: string | null; statusDefinitionId: string | null; priority: WorkItemPriority | null }
 export interface UpdateWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; title?: string; description?: string | null; priority?: WorkItemPriority | null; typeDefinitionId?: string | null; dueAt?: string | null }
 export interface MoveWorkItemInput extends SpaceCommandBase { projectId: string; workItemId: string; expectedVersion: number; newParentId: string | null }
+// ★ 2026-10-03（工单②）：同父内集合级重排 —— rank 是「去掉自己之后」的兄弟
+//   序列插入位次，兄弟行 child_rank 由服务端一并重写；parent_id 是 authority
+//   guard（换父走 moveWorkItem）。
+export interface ReorderWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; parentId: string | null; rank: number }
 export interface TransitionWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; statusDefinitionId: string }
 export interface ReplaceNoteInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; document: WorkItemNoteDocument }
 export interface AppendBlocksInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; blocks: WorkItemNoteDocument['blocks'] }
@@ -156,6 +160,16 @@ export const taskSpaceApi = {
       { projectId: input.projectId, expectedVersion: input.expectedVersion, parentId: input.newParentId },
       { new_parent_id: input.newParentId },
       (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/move`, body, options),
+    )
+  },
+  async reorderWorkItem(input: ReorderWorkItemInput) {
+    // ★ 工单②：集合级重排（先例 reorderStatusDefinition）。rank 的服务端语义
+    //   是「去掉自己之后」的兄弟插入位次 —— 兄弟行 rank 由服务端重写，客户端
+    //   只表达意图。parent_id 参与 payload hash（authority guard）。
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion, parentId: input.parentId, rank: input.rank },
+      { parent_id: input.parentId, rank: input.rank },
+      (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/reorder`, body, options),
     )
   },
   async transitionWorkItem(input: TransitionWorkItemInput) {

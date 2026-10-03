@@ -3,8 +3,13 @@
 import { createElement, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ChevronRight, Plus } from 'lucide-react'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
+// ★ 工单②：同层拖拽排序 —— 落点分区与 onReorder 回调。
+import type { SiblingPosition } from '@/lib/task-space/sibling-reorder'
 import type { CachedWorkItem } from '@/types'
 import { Button } from '@/components/ui/button'
+
+/** ★ 工单②：拖拽落点分区。 */
+type DropZone = 'before' | 'after' | 'child'
 
 export interface WorkItemTreeProps {
   items: CachedWorkItem[]
@@ -24,6 +29,9 @@ export interface WorkItemTreeProps {
   blockedSignals?: Record<string, { isBlocked: boolean; openBlockerCount?: number }>
   /** Parent-driven move: the component validates the drop target first. */
   onMove?: (workItemId: string, newParentId: string | null) => void
+  /** ★ 工单②：同层插入（before/after 落点）。同父直接 reorder；跨父由上层
+   *  拆成 move+reorder 两步。后端始终权威：非法落点服务端仍会拒绝。 */
+  onReorder?: (workItemId: string, targetId: string, position: SiblingPosition) => void
   /** Monotonic signal from the page shortcuts: collapse or expand every branch. */
   collapseSignal?: { seq: number; mode: 'collapse' | 'expand' } | null
   /**
@@ -65,6 +73,7 @@ export function WorkItemTree({
   pendingMutations = {},
   blockedSignals = {},
   onMove,
+  onReorder,
   collapseSignal = null,
   filterActive = false,
   openChildCountById = {},
@@ -72,7 +81,9 @@ export function WorkItemTree({
 }: WorkItemTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set())
   const draggedIdRef = useRef<string | null>(null)
-  const [dropHighlight, setDropHighlight] = useState<string | null>(null)
+  // ★ 工单②：drop 高亮带分区（before 上边线 / after 下边线 / child 行高亮）。
+  //   '__top__' 是树背景（成为根项）的哨兵 id。
+  const [dropTarget, setDropTarget] = useState<{ id: string; zone: DropZone } | null>(null)
   const collapseSeq = collapseSignal?.seq ?? 0
   const collapseMode = collapseSignal?.mode ?? null
 
@@ -140,16 +151,50 @@ export function WorkItemTree({
   // Drop-target validation mirrors the backend tree constraints (three
   // levels, no self/descendant parenting).  The backend stays authoritative:
   // an invalid drop that slips through is rejected server-side.
-  const canAcceptDrop = (draggedId: string, target: CachedWorkItem | null): boolean => {
-    if (!onMove) return false
-    if (target === null) {
-      // Top level: the moved subtree becomes depth 1..(1+relative).
-      return 1 + subtreeRelativeDepth(draggedId) <= 3
+  //
+  // ★ 工单②：落点分区 —— 行上缘 1/4 插到之前、下缘 1/4 插到之后、中间成为
+  //   子项。before/after 的树约束 = 「把被拖项 move 到 target 的父下」的约束
+  //   （同父时无树变化，任何非自身兄弟都可）；child 约束保持不变。jsdom 等
+  //   无布局环境 rect 高度为 0，兜底按 child 处理（兼容既有 move 语义测试）。
+  const dropZone = (event: React.DragEvent): DropZone => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    if (rect.height <= 0) return 'child'
+    const ratio = (event.clientY - rect.top) / rect.height
+    if (ratio < 0.25) return 'before'
+    if (ratio > 0.75) return 'after'
+    return 'child'
+  }
+
+  const canAcceptDrop = (
+    draggedId: string,
+    target: CachedWorkItem | null,
+    zone: DropZone = 'child',
+  ): boolean => {
+    if (zone === 'child' || target === null) {
+      if (!onMove) return false
+      if (target === null) {
+        // Top level: the moved subtree becomes depth 1..(1+relative).
+        return 1 + subtreeRelativeDepth(draggedId) <= 3
+      }
+      if (target.depth >= 3) return false
+      if (target.id === draggedId) return false
+      if (descendantsOf(draggedId).has(target.id)) return false
+      return target.depth + 1 + subtreeRelativeDepth(draggedId) <= 3
     }
-    if (target.depth >= 3) return false
+    if (!onReorder) return false
     if (target.id === draggedId) return false
-    if (descendantsOf(draggedId).has(target.id)) return false
-    return target.depth + 1 + subtreeRelativeDepth(draggedId) <= 3
+    const dragged = items.find((item) => item.id === draggedId)
+    if (!dragged) return false
+    const targetParentId = target.parentId ?? null
+    if ((dragged.parentId ?? null) === targetParentId) return true
+    // Cross-parent before/after ≙ move to target's parent: mirror Move's
+    // cycle + depth constraints.
+    if (targetParentId === draggedId) return false
+    if (targetParentId !== null && descendantsOf(draggedId).has(targetParentId)) return false
+    const parentDepth = targetParentId === null
+      ? 0
+      : (items.find((item) => item.id === targetParentId)?.depth ?? 0)
+    return parentDepth + 1 + subtreeRelativeDepth(draggedId) <= 3
   }
 
   const handleDragStart = (item: CachedWorkItem) => (event: React.DragEvent) => {
@@ -162,16 +207,31 @@ export function WorkItemTree({
     event.preventDefault()
     const draggedId = draggedIdRef.current
     draggedIdRef.current = null
-    setDropHighlight(null)
-    if (!draggedId || !canAcceptDrop(draggedId, target)) return
-    onMove?.(draggedId, target?.id ?? null)
+    setDropTarget(null)
+    if (!draggedId) return
+    if (target === null) {
+      // Tree background: become a root item (move semantics).
+      if (!canAcceptDrop(draggedId, null, 'child')) return
+      onMove?.(draggedId, null)
+      return
+    }
+    const zone = dropZone(event)
+    if (!canAcceptDrop(draggedId, target, zone)) return
+    if (zone === 'child') {
+      onMove?.(draggedId, target.id)
+    } else {
+      onReorder?.(draggedId, target.id, zone)
+    }
   }
 
   const renderLevel = (parentId: string | null, level: 1 | 2 | 3): ReactNode => (
     children.get(parentId)?.map((item) => {
       // 过滤激活时不理会手工折叠：命中的深层节点必须直接可见。
       const collapsed = filterActive ? false : collapsedIds.has(item.id)
-      const droppable = onMove !== null && level < 3
+      // ★ 工单②：L3 行不接受 child（已是叶子层），但要接受 before/after
+      //   （同级插入）—— droppable 因此与 onMove/onReorder 的可用性分别判定。
+      const droppable = (onMove !== null && level < 3) || onReorder !== undefined
+      const rowDrop = dropTarget?.id === item.id ? dropTarget.zone : null
       const blocked = blockedSignals[item.id]?.isBlocked === true
       const openBlockers = blockedSignals[item.id]?.openBlockerCount ?? 0
       const blockedHint = blocked
@@ -192,22 +252,29 @@ export function WorkItemTree({
         createElement(
           'div',
           {
-            className: droppable
-              ? `group flex min-h-9 items-center gap-1 px-2${dropHighlight === item.id ? ' rounded bg-accent' : ''}`
-              : `group flex min-h-9 items-center gap-1 px-2${dropHighlight === item.id ? ' rounded bg-accent' : ''}`,
+            className: `group flex min-h-9 items-center gap-1 px-2${
+              rowDrop === 'before'
+                ? ' shadow-[inset_0_2px_0_0_var(--primary)]'
+                : rowDrop === 'after'
+                  ? ' shadow-[inset_0_-2px_0_0_var(--primary)]'
+                  : rowDrop === 'child'
+                    ? ' rounded bg-accent'
+                    : ''
+            }`,
             style: { paddingInlineStart: `${level * 12}px` },
             draggable: true,
             onDragStart: handleDragStart(item),
             onDragOver: droppable
               ? (event: React.DragEvent) => {
                   if (draggedIdRef.current === null) return
-                  if (!canAcceptDrop(draggedIdRef.current, item)) return
+                  const zone = dropZone(event)
+                  if (!canAcceptDrop(draggedIdRef.current, item, zone)) return
                   event.preventDefault()
-                  setDropHighlight(item.id)
+                  setDropTarget({ id: item.id, zone })
                 }
               : undefined,
             onDragLeave: droppable
-              ? () => setDropHighlight((current) => (current === item.id ? null : current))
+              ? () => setDropTarget((current) => (current?.id === item.id ? null : current))
               : undefined,
             onDrop: droppable ? handleDrop(item) : undefined,
           },
@@ -311,18 +378,18 @@ export function WorkItemTree({
     {
       role: 'tree',
       'aria-label': 'Work items',
-      className: `min-w-0 py-2${dropHighlight === '__top__' ? ' rounded bg-accent/60' : ''}`,
+      className: `min-w-0 py-2${dropTarget?.id === '__top__' ? ' rounded bg-accent/60' : ''}`,
       onDragOver: onMove
         ? (event: React.DragEvent) => {
             const draggedId = draggedIdRef.current
             if (draggedId === null) return
             if (!canAcceptDrop(draggedId, null)) return
             event.preventDefault()
-            setDropHighlight('__top__')
+            setDropTarget({ id: '__top__', zone: 'child' })
           }
         : undefined,
       onDragLeave: onMove
-        ? () => setDropHighlight((current) => (current === '__top__' ? null : current))
+        ? () => setDropTarget((current) => (current?.id === '__top__' ? null : current))
         : undefined,
       onDrop: onMove ? handleDrop(null) : undefined,
     },

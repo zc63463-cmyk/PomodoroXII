@@ -669,6 +669,110 @@ async def _compile_MoveWorkItem(self, context, request):
 TaskSpaceCompiler.compile_MoveWorkItem = _compile_MoveWorkItem
 
 
+# -- ReorderWorkItem (same-parent sibling repositioning) -----------------------
+
+
+async def _compile_ReorderWorkItem(self, context, request):
+    """把 item 插到**同父兄弟序列**的目标位次（工单②：同层拖拽排序）。
+
+    ★ 集合级操作（先例 ``_compile_ReorderStatusDefinition``）：
+      - parent_id 是 authority guard：必须等于当前父项（None = 根层）。换父
+        请走 MoveWorkItem —— 那里才有环 / 深度 / 跨项目全套树校验。
+      - 逐行 CAS 会让并发 reorder 互相打架（后写者因兄弟行 version 变了而
+        失败，见 status reorder 的注释）⇒ expected_version 只锁**被移动行**，
+        兄弟行按读到的 version 乐观写入。
+      - rank 语义：在去掉自己之后的兄弟序列中的插入位次（clamp 到
+        [0, len(rest)]）；重排后该父项下 rank 规范化为 0..n-1 —— 顺带填掉
+        append-only 分配器留下的洞（只触碰同一父项的行，其它父项不动）。
+      - 幂等：已在目标位次且无洞（rank == index 对所有兄弟成立）⇒ 零效果
+        回执（无 version bump / 无 sync 事件）。
+      - sync 重放**不需要新路径**：受影响行的 update 事件只改 child_rank /
+        version / updated_at ⇒ 属于 move family（WORK_ITEM_MOVE_FIELDS 含
+        child_rank），对端经 _compile_MoveWorkItem 二次编译 verbatim 应用。
+    """
+    from app.mutation.types import MutationRuleViolation
+
+    overlay = context.authority
+    item = _require_row(overlay, "work_item", request.entity_id)
+    _require_expected_version(item, request.expected_version)
+    requested_parent_id = request.payload.get("parent_id")
+    requested_parent_id = (
+        None if requested_parent_id is None else str(requested_parent_id)
+    )
+    if requested_parent_id != item["parent_id"]:
+        raise MutationRuleViolation(
+            "invalid_work_item_tree",
+            {"reason": "cross_parent_reorder"},
+            retryable=False,
+        )
+    target_rank = int(request.payload["rank"])
+    siblings = sorted(
+        (
+            row
+            for row in overlay.rows("work_item")
+            if str(row["project_id"]) == str(item["project_id"])
+            and row["parent_id"] == item["parent_id"]
+        ),
+        key=lambda row: (int(row["child_rank"]), str(row["id"])),
+    )
+    moving = next(row for row in siblings if str(row["id"]) == str(item["id"]))
+    rest = [row for row in siblings if str(row["id"]) != str(item["id"])]
+    rest.insert(max(0, min(target_rank, len(rest))), moving)
+    now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
+    plans: list[DbMutationPlan] = []
+    events: list[SyncEventPlan] = []
+    moved_post: dict[str, object] | None = None
+    for index, row in enumerate(rest):
+        if int(row["child_rank"]) == index:
+            continue  # 位置未变，不写（含零效果情形）
+        after = {
+            **row,
+            "child_rank": index,
+            "updated_at": now,
+            "version": int(row["version"]) + 1,
+        }
+        plan = DbMutationPlan(
+            "work_items",
+            {"id": row["id"]},
+            "update",
+            int(row["version"]) if str(row["id"]) != str(item["id"])
+            else request.expected_version,
+            row,
+            after,
+        )
+        # D5 Y：每个 workItem post-image 携带服务端权威的 label_ids 投影。
+        post = {
+            **after,
+            "label_ids": _label_ids_for_work_item(overlay, str(row["id"])),
+        }
+        event = SyncEventPlan(
+            "work_item", str(row["id"]), "update", post,
+            int(after["version"]), now,
+        )
+        plans.append(plan)
+        events.append(event)
+        if str(row["id"]) == str(item["id"]):
+            moved_post = post
+    if not plans:
+        # 已经就位：幂等零效果
+        return context.command(
+            request=request,
+            db_plans=(),
+            sync_events=(),
+            value={
+                **item,
+                "label_ids": _label_ids_for_work_item(overlay, str(item["id"])),
+            },
+        )
+    return context.command(
+        request=request, db_plans=tuple(plans), sync_events=tuple(events),
+        value=moved_post,
+    )
+
+
+TaskSpaceCompiler.compile_ReorderWorkItem = _compile_ReorderWorkItem
+
+
 # -- TransitionWorkItem with Session envelope fence ---------------------------
 
 
