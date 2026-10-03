@@ -180,14 +180,50 @@ def _migrate_paused_rows() -> tuple[int, int]:
 def _fk_guard(enabled: bool) -> None:
     """临时切 SQLite 的 foreign_keys 开关（batch copy-and-move 必需）。
 
-    SQLite 的 PRAGMA foreign_keys **不能**在事务中切换，但 alembic 的
-    batch 重建本身就在autocommit 下逐条 DDL 执行，实测可正常切换。
-    忘记关闭会得到 `FOREIGN KEY constraint failed: DROP TABLE status_definitions`
-    （work_items / projects 有 3 处入向引用它）。
+    ★★ 2026-10-03 修正（此前实现是错的，真实启动才暴露）
+    旧实现只 `execute("PRAGMA foreign_keys=OFF")` 就完事，**在真实启动路径上无效**：
+    - 症状：第一个空间（无 work_items 引用）迁成功；第二个空间
+      `15e64740`（有 2 条paused work_items）报
+      ``IntegrityError: FOREIGN KEY constraint failed / DROP TABLE status_definitions``，
+      启动在 `prepare_registered_spaces` 中断，端口不监听。
+    - 原因：``PRAGMA foreign_keys`` **在事务内是 no-op**，而迁移路径上
+      前一个迁移写版本表的 DML 留下了未提交事务 ⇒ 切换静默失败。
+    - 修法（照014 的成熟做法 `014_pre_waiting_status.py:86-102`）：
+      先 `commit()` 结束当前事务（此时结构与版本表一致，提交安全），
+      再切换，**立刻读回验证**；切不掉就fail-loud 抛错，绝不带着 ON 硬走。
+
+    为什么必须关：``sqlite_vfs`` 的所有连接都强制 ``foreign_keys=ON``
+    （``app/runtime/sqlite_vfs.py:578`` 与 ``:613``），而 SQLite 12 步
+    copy-and-move 的第 8 步 ``DROP TABLE status_definitions`` 在有引用行时必然失败。
     """
-    op.get_bind().execute(
-        sa.text(f"PRAGMA foreign_keys = {'ON' if enabled else 'OFF'}")
-    )
+    bind = op.get_bind()
+    before = bind.exec_driver_sql("PRAGMA foreign_keys").scalar()
+    if not enabled:
+        if before:
+            bind.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            if bind.exec_driver_sql("PRAGMA foreign_keys").scalar():
+                # pragma 在事务内是 no-op —— 先结束事务再试（014 实测同款）
+                if bind.in_transaction():
+                    bind.commit()
+                bind.exec_driver_sql("PRAGMA foreign_keys=OFF")
+                if bind.exec_driver_sql("PRAGMA foreign_keys").scalar():
+                    raise RuntimeError(
+                        "space_017_status_dual_axis requires "
+                        "PRAGMA foreign_keys=OFF for the status_definitions rebuild "
+                        "but the pragma is a no-op (active transaction)"
+                    )
+    else:
+        if not before:
+            bind.exec_driver_sql("PRAGMA foreign_keys=ON")
+            if not bind.exec_driver_sql("PRAGMA foreign_keys").scalar():
+                if bind.in_transaction():
+                    bind.commit()
+                bind.exec_driver_sql("PRAGMA foreign_keys=ON")
+                if not bind.exec_driver_sql("PRAGMA foreign_keys").scalar():
+                    raise RuntimeError(
+                        "space_017_status_dual_axis could not restore "
+                        "PRAGMA foreign_keys=ON after the rebuild"
+                    )
 
 
 def _assert_integrity(before_rows: int) -> None:
