@@ -733,7 +733,9 @@ export function layoutArchipelagoIsland(
   let maxCardBottom = ARCHIPELAGO_START_Y + ARCHIPELAGO_CARD_H
 
   // 2. 遍历各子岛，计算独立卡片内部几何与连线
-  const newSubIslands: MapSubIsland[] = subIslands.map((sub, idx) => {
+  /** 收尾对齐用：先收集所有卡，齐底后统一回填 maxY */
+  const pendingSubIslands: MapSubIsland[] = []
+  const newSubIslands: MapSubIsland[] = subIslands.map((subStable, idx) => {
     const cardX = offsetX + idx * (ARCHIPELAGO_CARD_W + ARCHIPELAGO_GAP_X)
     const cardY = ARCHIPELAGO_START_Y
     const cardW = ARCHIPELAGO_CARD_W
@@ -749,17 +751,17 @@ export function layoutArchipelagoIsland(
     const hubToSubPath = `M ${hubFromX} ${hubFromY} C ${hubFromX} ${cpY}, ${cardTopMidX} ${cpY}, ${cardTopMidX} ${cardTopMidY}`
     newLinks.push({
       fromId: island.tree.id,
-      toId: sub.rootNode.id,
+      toId: subStable.rootNode.id,
       path: hubToSubPath,
     })
 
     // 子岛根节点（L3 任务节点）：置于卡片上半部分
-    const rootText = sub.rootNode.text === '' ? '子任务' : sub.rootNode.text
-    const naturalRootW = sub.rootNode.box
-      ? Math.max(clampWidth(estimateTextWidth(rootText, 12) + 24), sub.rootNode.box.w)
+    const rootText = subStable.rootNode.text === '' ? '子任务' : subStable.rootNode.text
+    const naturalRootW = subStable.rootNode.box
+      ? Math.max(clampWidth(estimateTextWidth(rootText, 12) + 24), subStable.rootNode.box.w)
       : clampWidth(estimateTextWidth(rootText, 12) + 24)
     const rootW = Math.min(cardW - 32, naturalRootW)
-    const rootH = sub.rootNode.box ? Math.max(26, sub.rootNode.box.h) : 26
+    const rootH = subStable.rootNode.box ? Math.max(26, subStable.rootNode.box.h) : 26
     const subRootBox: MapBox = {
       x: cardX + 16,
       y: cardY + 42,
@@ -767,74 +769,93 @@ export function layoutArchipelagoIsland(
       h: rootH,
     }
     const newSubRoot: MapTreeNode = {
-      ...sub.rootNode,
+      ...subStable.rootNode,
       box: subRootBox,
       children: [],
     }
     nodeMap.set(newSubRoot.id, newSubRoot)
 
-    // 子岛下属思考节点：垂直规整排开
-    const thoughtNodes = sub.nodes.filter((node) => node.id !== sub.rootNode.id)
+    /**
+     * 子岛下属节点：**按真实层级缩进排开**（2026-10-03 真机回归修复）。
+     *
+     * ## 旧实现为什么错
+     * 取 `subStable.nodes`（`flatten(child)` 的**前序扁平**列表）逐个竖排，并把每条连线
+     * 都从**子岛根**发出 → 任意深度的后代都被拉平成子岛根的兄弟。
+     * 真机症状：`.mm.md` 里 `xe`(H4) 带 3 个 H5 子节点，主图却把它们与 `xe` 并排。
+     *
+     * ## 现在的做法
+     * 递归原树（`subStable.rootNode` 的 children 结构本身是完整的），
+     * 深度只影响**x 缩进**，y 仍单序列出 —— 卡片是竖条不是树图。
+     * 连线用**真实父节点**作 `fromId`。
+     */
     const newSubNodes: MapTreeNode[] = [newSubRoot]
     const subInternalLinks: { fromId: string; toId: string; path: string }[] = []
+    const NODE_GAP_Y = 8
+    // 每层缩进量；最浅一级（子岛根的孩子）留出连线通道
+    const INDENT_STEP = 14
+    const baseIndentX = cardX + 44
 
     let currentY = subRootBox.y + subRootBox.h + 10
-    for (const thought of thoughtNodes) {
-      const thH = thought.box ? Math.max(24, thought.box.h) : 24
-      const thW = cardW - 56
-      const thBox: MapBox = {
-        x: cardX + 44,
+    const place = (node: MapTreeNode, parentPlaced: MapTreeNode, depth: number): void => {
+      const nodeH = node.box ? Math.max(24, node.box.h) : 24
+      const box: MapBox = {
+        x: baseIndentX + depth * INDENT_STEP,
         y: currentY,
-        w: thW,
-        h: thH,
+        w: cardW - 56 - depth * INDENT_STEP,
+        h: nodeH,
       }
-      const newThought: MapTreeNode = {
-        ...thought,
-        box: thBox,
-      }
-      newSubNodes.push(newThought)
-      newSubRoot.children.push(newThought)
-      nodeMap.set(newThought.id, newThought)
+      const placed: MapTreeNode = { ...node, box, children: [] }
+      currentY += nodeH + NODE_GAP_Y
+      nodeMap.set(placed.id, placed)
+      newSubNodes.push(placed)
+      parentPlaced.children.push(placed)
 
-      // 从子岛根连到该思考节点的连线
-      const fromX = subRootBox.x + 12
-      const fromY = subRootBox.y + subRootBox.h
-      const toX = thBox.x
-      const toY = thBox.y + 12
+      // 连线：**从真实父节点**出发
+      const fromX = parentPlaced.box.x + 12
+      const fromY = parentPlaced.box.y + parentPlaced.box.h
+      const toX = box.x
+      const toY = box.y + 12
       const pathD = `M ${fromX} ${fromY} C ${fromX} ${toY}, ${toX - 10} ${toY}, ${toX} ${toY}`
-      const subLink = {
-        fromId: sub.rootNode.id,
-        toId: thought.id,
-        path: pathD,
-      }
+      const subLink = { fromId: parentPlaced.id, toId: placed.id, path: pathD }
       subInternalLinks.push(subLink)
       newLinks.push(subLink)
 
-      currentY += thH + 8
+      for (const child of node.children) place(child, placed, depth + 1)
     }
+    for (const child of subStable.rootNode.children) place(child, newSubRoot, 0)
 
     const cardH = Math.max(ARCHIPELAGO_CARD_H, currentY - cardY + 36)
     if (cardY + cardH > maxCardBottom) {
       maxCardBottom = cardY + cardH
     }
 
-    const bounds = {
-      minX: cardX,
-      minY: cardY,
-      maxX: cardX + cardW,
-      maxY: cardY + cardH,
-    }
-
-    return {
-      id: sub.id,
-      title: sub.title,
-      cid: sub.cid,
+    // 卡片底边**尚未确定**（要等所有卡都排完才知道最高卡多高）。
+    // 先把内部产物挂在一个可变对象上，收尾时统一回填 maxY ——
+    // 否则矮卡片的 bounds 只到自己的内容底，渲染层按 bounds 画框就会
+    // 出现「框比内容矮一截 / 底部留大片空白」（2026-10-03 真机发现）。
+    const sub = {
+      id: subStable.id,
+      title: subStable.title,
+      cid: subStable.cid,
       rootNode: newSubRoot,
       nodes: newSubNodes,
       links: subInternalLinks,
-      bounds,
+      bounds: {
+        minX: cardX,
+        minY: cardY,
+        maxX: cardX + cardW,
+        maxY: cardY + cardH,
+      },
     }
+    pendingSubIslands.push(sub)
+    return sub
   })
+
+  // 收尾：所有卡齐底 → 各自 bounds.maxY 抬到同一水平线
+  const alignedBottom = maxCardBottom
+  for (const sub of pendingSubIslands) {
+    sub.bounds.maxY = alignedBottom
+  }
 
   const newTree: MapTreeNode = {
     ...island.tree,
