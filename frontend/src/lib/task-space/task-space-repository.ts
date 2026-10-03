@@ -1,4 +1,4 @@
-import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, relationSchema, workItemSchema, type CachedRelation, type RelationSet, type TaskSpaceDefinitions, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
+import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, readStatusDefinition, statusDefinitionSchema, relationSchema, workItemSchema, type CachedRelation, type RelationSet, type TaskSpaceDefinitions, type StatusCategoryValue, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
 import { relationId } from '@/lib/task-space/relation-id'
 import type { JsonValue } from '@/lib/contracts/payload-hash'
 import {
@@ -22,7 +22,7 @@ import { applyAuthoritativeReviewAndClearDraft } from '@/lib/focus-session/focus
 import { executeSubmitReviewIntent } from '@/lib/focus-session/review-intent-executor'
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
-import type { CachedProject, CachedWorkItem, CachedLabel, DirectCommandIntentRow } from '@/types'
+import type { CachedProject, CachedWorkItem, CachedLabel, CachedStatusDefinition, DirectCommandIntentRow } from '@/types'
 
 export interface CreateRelationInput {
   fromWorkItemId: string
@@ -123,6 +123,31 @@ function mapLabel(value: unknown): CachedLabel {
     id: field(raw, 'id'),
     name: field(raw, 'name'),
     color: field(raw, 'color') ?? null,
+    archivedAt: field(raw, 'archivedAt', 'archived_at') ?? null,
+    version: field(raw, 'version'),
+    createdAt: field(raw, 'createdAt', 'created_at'),
+    updatedAt: field(raw, 'updatedAt', 'updated_at'),
+  })
+}
+
+/**
+ * 状态双轴：把 REST 回执映射成本地缓存行。
+ *
+ * ★ `system` / `rank` / `category` 必须落库 —— 前三者都要参与本地展示与
+ *   后续 CAS（`system` 决定谁是语义锚点，`rank` 决定组内序）。
+ *   缺任何一项都会让本地视图与服务端分叉。
+ *   `category` 用宽松 string（schema 侧刻意不设 enum，见 contracts 注释）。
+ */
+function mapStatusDefinition(value: unknown): CachedStatusDefinition {
+  const raw = primaryValue(value, ['status_definition', 'statusDefinition'])
+  return statusDefinitionSchema.parse({
+    id: field(raw, 'id'),
+    name: field(raw, 'name'),
+    category: field(raw, 'category'),
+    icon: field(raw, 'icon') ?? null,
+    color: field(raw, 'color') ?? null,
+    rank: field(raw, 'rank'),
+    system: field(raw, 'system'),
     archivedAt: field(raw, 'archivedAt', 'archived_at') ?? null,
     version: field(raw, 'version'),
     createdAt: field(raw, 'createdAt', 'created_at'),
@@ -591,6 +616,13 @@ export class TaskSpaceRepository {
       create_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.createLabel(request as never)).then(() => undefined) },
       update_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.updateLabel(request as never)).then(() => undefined) },
       archive_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.archiveLabel(request as never)).then(() => undefined) },
+      // ★ 2026-10-03（状态双轴阶段 3）：status 四命令的**重放**映射。
+      //   少注册一个，崩溃恢复时该 intent 会落到 unknown 分支被标failed ——
+      //   用户那次「新建状态」就被静默丢弃（同 remove_work_item_labels 的教训）。
+      create_status_definition: { executeExact: (intent) => this.executeStatusDefinitionIntent(intent, (request) => this.api.createStatusDefinition(request as never)).then(() => undefined) },
+      update_status_definition: { executeExact: (intent) => this.executeStatusDefinitionIntent(intent, (request) => this.api.updateStatusDefinition(request as never)).then(() => undefined) },
+      reorder_status_definition: { executeExact: (intent) => this.executeStatusDefinitionIntent(intent, (request) => this.api.reorderStatusDefinition(request as never)).then(() => undefined) },
+      archive_status_definition: { executeExact: (intent) => this.executeStatusDefinitionIntent(intent, (request) => this.api.archiveStatusDefinition(request as never)).then(() => undefined) },
       // ★ 2026-09-11：绑定共享执行器（此前是抛错桩，会让整批续跑在第一条
       // submit_review 上终止）。执行走 prepare/executeDurableDirectCommand，
       // 保持幂等与 durable 语义；失败由队列按 intent 记录并继续后续 intent。
@@ -679,6 +711,95 @@ export class TaskSpaceRepository {
       sendExactRequest: send,
       parseResult: (value) => mapLabel(value),
       applyResult: async (label) => { await this.db.labels.put(label) },
+      now: canonicalNow,
+    })
+  }
+
+  // ---- 状态定义生命周期（状态双轴阶段 3） ---------------------------------
+  //
+  // ★ 与 label 走同一条 intent/outbox 路径（离线优先），
+  //   但落库目标是 ``db.statusDefinitions``（Dexie 表已存在，schema 无需升版本 ——
+  //   ``dexie-v18-schema.ts:74`` 已有 `id` 主键 + rank 索引）。
+  //   businessTables 里带上 workItems：status 行被工作项引用，改名/归档会改变
+  //   工作项的读投影，必须同事务落库，否则崩溃恢复后行不一致。
+  //
+  // ★ 不做乐观更新：status 行参与 sync post-image 与 version CAS，
+  //   本地先猜一个 rank/system 会与服务端算出的结果分叉（labelIds 的教训同源）。
+
+  async createStatusDefinition(input: {
+    name: string
+    category: StatusCategoryValue
+    color?: string | null
+  }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'create_status_definition', spaceId: this.spaceId, targetId: null,
+      request: { ...input, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeStatusDefinitionIntent(intent, (request) =>
+      this.api.createStatusDefinition(request as never),
+    )
+  }
+
+  async updateStatusDefinition(input: {
+    statusId: string
+    name?: string
+    category?: StatusCategoryValue
+    color?: string | null
+  }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.statusDefinitions.get(input.statusId)
+    if (!cached) throw new Error('status_definition_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'update_status_definition', spaceId: this.spaceId, targetId: input.statusId,
+      request: {
+        ...input,
+        expectedVersion: readStatusDefinition(cached)?.version ?? 0,
+        spaceId: this.spaceId,
+      },
+      now: canonicalNow(),
+    })
+    return this.executeStatusDefinitionIntent(intent, (request) =>
+      this.api.updateStatusDefinition(request as never),
+    )
+  }
+
+  async reorderStatusDefinition(input: { statusId: string; rank: number }) {
+    // ★ 刻意**不取expectedVersion**（集合级重排，服务端逐行 CAS 会让并发打架）。
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'reorder_status_definition', spaceId: this.spaceId, targetId: input.statusId,
+      request: { ...input, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeStatusDefinitionIntent(intent, (request) =>
+      this.api.reorderStatusDefinition(request as never),
+    ).then(() => undefined)
+  }
+
+  async archiveStatusDefinition(input: { statusId: string; expectedVersion: number }) {
+    // 后端有引用守卫：仍被 work_items 引用时 409 `status_definition_in_use`。
+    // 那条拒绝**要透出**（store 的 errorMessage → 面板 errorMessage），不静默吞。
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'archive_status_definition', spaceId: this.spaceId, targetId: input.statusId,
+      request: { ...input, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeStatusDefinitionIntent(intent, (request) =>
+      this.api.archiveStatusDefinition(request as never),
+    )
+  }
+
+  private executeStatusDefinitionIntent(
+    intent: DirectCommandIntentRow,
+    send: (request: Record<string, JsonValue>) => Promise<unknown>,
+  ) {
+    return executeDurableDirectCommand({
+      db: this.db,
+      intent,
+      businessTables: [this.db.statusDefinitions, this.db.workItems],
+      sendExactRequest: send,
+      parseResult: (value) => mapStatusDefinition(value),
+      applyResult: async (row) => { await this.db.statusDefinitions.put(row) },
       now: canonicalNow,
     })
   }

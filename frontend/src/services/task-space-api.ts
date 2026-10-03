@@ -1,4 +1,4 @@
-import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, workItemCreateBusinessPayload, workItemPatchBusinessPayload, workItemReadSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItemNote, type WorkItemNoteDocument, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
+import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, workItemCreateBusinessPayload, workItemPatchBusinessPayload, workItemReadSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItemNote, type WorkItemNoteDocument, type StatusCategoryValue, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
 import { buildCommandFields, hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
 import { spaceApi } from './api'
 
@@ -26,6 +26,30 @@ export interface RemoveWorkItemLabelsInput extends SpaceCommandBase { workItemId
 export interface CreateLabelInput extends SpaceCommandBase { name: string; color?: string | null }
 export interface UpdateLabelInput extends SpaceCommandBase { labelId: string; expectedVersion: number; name?: string; color?: string | null }
 export interface ArchiveLabelInput extends SpaceCommandBase { labelId: string; expectedVersion: number }
+// ---- Status definition（状态双轴阶段 3） -----------------------------------
+export interface CreateStatusDefinitionInput extends SpaceCommandBase {
+  name: string
+  category: StatusCategoryValue
+  icon?: string | null
+  color?: string | null
+}
+export interface UpdateStatusDefinitionInput extends SpaceCommandBase {
+  statusId: string
+  expectedVersion: number
+  name?: string
+  category?: StatusCategoryValue
+  icon?: string | null
+  color?: string | null
+}
+/** ★ 没有 expectedVersion —— 集合级重排，后端刻意不锁行版本。 */
+export interface ReorderStatusDefinitionInput extends SpaceCommandBase {
+  statusId: string
+  rank: number
+}
+export interface ArchiveStatusDefinitionInput extends SpaceCommandBase {
+  statusId: string
+  expectedVersion: number
+}
 
 type AxiosConfig = { headers?: { 'Idempotency-Key'?: string } }
 
@@ -214,6 +238,55 @@ export const taskSpaceApi = {
     return command(input.operationId, input.spaceId,
       { expectedVersion: input.expectedVersion }, {},
       (body, options) => spaceApi.request({ method: 'DELETE', url: `/labels/${encodeURIComponent(input.labelId)}`, data: body, ...options }),
+    )
+  },
+
+  // ---- Status definition（状态双轴阶段 3） -------------------------------
+  //
+  // ★ 业务载荷（`command` 的第 4 参）里category 必须与 wire 一致：
+  //   后端 `module.py::_business_payload` 把 category 计入 payload_hash
+  //   （"改 category 就是改语义= 换分组"），两边不一致会让幂等回执永不命中。
+
+  async createStatusDefinition(input: CreateStatusDefinitionInput) {
+    const name = input.name.trim()
+    const category = input.category
+    const icon = input.icon ?? null
+    const color = input.color ?? null
+    return command(input.operationId, input.spaceId,
+      { name, category, icon, color },
+      { name, category, icon, color },
+      (body, options) => spaceApi.post('/status-definitions', body, options),
+    )
+  },
+  async updateStatusDefinition(input: UpdateStatusDefinitionInput) {
+    const wire: Record<string, unknown> = { expectedVersion: input.expectedVersion }
+    const internal: Record<string, unknown> = {}
+    if (input.name !== undefined) {
+      const name = input.name.trim()
+      wire.name = name
+      internal.name = name
+    }
+    if (input.category !== undefined) { wire.category = input.category; internal.category = input.category }
+    if (input.icon !== undefined) { wire.icon = input.icon; internal.icon = input.icon }
+    if (input.color !== undefined) { wire.color = input.color; internal.color = input.color }
+    return command(input.operationId, input.spaceId, wire, internal,
+      (body, options) => spaceApi.patch(`/status-definitions/${encodeURIComponent(input.statusId)}`, body, options),
+    )
+  },
+  async reorderStatusDefinition(input: ReorderStatusDefinitionInput) {
+    // ★ 刻意没有 expectedVersion：集合级操作，后端逐行 CAS 会让并发互相打架。
+    const rank = input.rank
+    return command(input.operationId, input.spaceId,
+      { rank }, { rank },
+      (body, options) => spaceApi.post(`/status-definitions/${encodeURIComponent(input.statusId)}/reorder`, body, options),
+    )
+  },
+  async archiveStatusDefinition(input: ArchiveStatusDefinitionInput) {
+    // 后端有引用守卫：有 work_items 指向该 status 时返回 409
+    // `status_definition_in_use` —— 前端要把那条 message 透给用户，不能吞。
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion }, {},
+      (body, options) => spaceApi.post(`/status-definitions/${encodeURIComponent(input.statusId)}/archive`, body, options),
     )
   },
   async listRelations(_spaceId: string, workItemId: string): Promise<RelationSet> {

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import { canonicalNow } from '@/lib/direct-command-intents'
-import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
+import type { StatusCategoryValue, TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { NoteAutosaveController, type FlushReason } from '@/lib/task-space/note-autosave-controller'
 import { summarizeIntentFailures } from '@/lib/task-space/intent-failure-summary'
@@ -22,7 +22,7 @@ import {
 // Re-exported so callers keep importing the conflict signal from the store
 // while the class identity stays owned by the leaf module (no import cycle).
 export { ACTIVE_CHILD_CONFLICT_CODE, ActiveChildConflictError, extractActiveChildConflictIds }
-import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow, CachedLabel } from '@/types'
+import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow, CachedLabel, CachedStatusDefinition } from '@/types'
 import type { BlockedMap, CachedRelation, RelationSet, WorkItemPriority } from '@/lib/contracts/task-space'
 
 export interface CreateChildInput {
@@ -103,6 +103,25 @@ export interface TaskSpaceRepositoryLike {
   createLabel: (input: { name: string; color?: string | null }) => Promise<CachedLabel>
   updateLabel: (input: { labelId: string; name?: string; color?: string | null }) => Promise<CachedLabel>
   archiveLabel: (input: { labelId: string }) => Promise<CachedLabel>
+  // ---- 状态定义（状态双轴阶段 3） ---------------------------------------
+  createStatusDefinition: (input: {
+    name: string
+    category: StatusCategoryValue
+    color?: string | null
+  }) => Promise<CachedStatusDefinition>
+  updateStatusDefinition: (input: {
+    statusId: string
+    name?: string
+    category?: StatusCategoryValue
+    color?: string | null
+  }) => Promise<CachedStatusDefinition>
+  /** ★ 没有 expectedVersion：集合级重排（后端刻意不锁行版本）。 */
+  reorderStatusDefinition: (input: { statusId: string; rank: number }) => Promise<void>
+  /** 后端有引用守卫：仍被 work_items 引用时 409 `status_definition_in_use`。 */
+  archiveStatusDefinition: (input: {
+    statusId: string
+    expectedVersion: number
+  }) => Promise<CachedStatusDefinition>
   resumePendingDirectCommandIntents: () => Promise<{ failed: Array<{ operationId: string; code: string }> }>
 }
 
@@ -458,11 +477,59 @@ const mergeProjectWorkItems = (
   ...replacement,
 ]
 
-const definitionId = (definitions: TaskSpaceDefinitions | null, group: 'statuses' | 'types'): string | null => {
-  const first = definitions?.[group][0]
-  if (!first || typeof first !== 'object' || first === null) return null
-  const id = (first as Record<string, unknown>).id
-  return typeof id === 'string' && id.length > 0 ? id : null
+/**
+ * 取一个 group（statuses / types）里的默认定义 id。
+ *
+ * ★ 2026-10-03（状态双轴阶段 3）：**不能直接取 `[0]`**。
+ *   阶段 2 开放了用户自定义 status 后，同一 category 下会有多条 status，
+ *   而后端 `queries.list_definitions` 按 (rank, id) 排序 —— 用户新建的
+ *   排在系统行之后，于是 `[0]` 恰好还是系统行；但一旦用户行的 rank 更小
+ *   （或后端调整排序），`[0]` 就会变成用户行，导致新建工作项默认挂到
+ *   「等设计 review」这类非常驻状态上。
+ *   ⇒ 显式**优先 system 行**；没有 system 行时才退回第一条（type_definitions
+ *   目前只有一条系统行，但同样按此规则处理，避免将来加用户类型时再踩）。
+ */
+const definitionId = (
+  definitions: TaskSpaceDefinitions | null,
+  group: 'statuses' | 'types',
+): string | null => {
+  const rows = definitions?.[group] ?? []
+  const readId = (row: unknown): string | null => {
+    if (!row || typeof row !== 'object') return null
+    const id = (row as Record<string, unknown>).id
+    return typeof id === 'string' && id.length > 0 ? id : null
+  }
+  // 优先系统行（status 列表里 system===true 的是每个 category 的代表行）
+  for (const row of rows) {
+    if (row && typeof row === 'object' && (row as Record<string, unknown>).system === true) {
+      const id = readId(row)
+      if (id) return id
+    }
+  }
+  for (const row of rows) {
+    if (row && typeof row === 'object' && (row as Record<string, unknown>).system !== true) {
+      const id = readId(row)
+      if (id) return id
+    }
+  }
+  return readId(rows[0])
+}
+
+/**
+ * 只刷新 definitions（状态定义写操作后用）。
+ *
+ * ★ 为什么不用完整的 `refreshOverview` 状态覆盖：
+ *   那边会把 projects / workItems / selectedProjectId 一起重算，用户正在
+ *   编辑的工作项可能被踢出选中态（hydrate 里专门写过"远端刷新不该把人从
+ *   详情面板里踢出来"的注释）。status 改动只影响定义表，**不该动别的**。
+ *   ⇒ 这里只取 definitions，其余 state 一律不碰。
+ */
+async function refreshDefinitionsOnly(
+  repository: TaskSpaceRepositoryLike,
+  set: (partial: Partial<TaskSpaceState>) => void,
+): Promise<void> {
+  const remote = await repository.refreshOverview()
+  set({ definitions: remote.definitions })
 }
 
 /**
@@ -987,6 +1054,86 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           // exception text (Axios bodies, tokens, paths).
           const mapped = resolveTaskSpaceMutationError(error)
           set({ error: mapped.message, mutationError: { targetId: '__project__', code: mapped.code } })
+          throw error
+        }
+      },
+
+      // ---- 状态定义生命周期（状态双轴阶段 3） -----------------------------
+      //
+      // ★ 四个 action 都只做「委派 + 刷新 definitions + 错误映射」。
+      //   definitions.statuses 是**服务端权威**的开放 record，前端不自行乐观改写 ——
+      //   理由：status 行参与 sync post-image 与 version CAS，本地猜一个 rank/
+      //   system 会与服务端算出的结果分叉（TS-02a 的 labelIds 教训同源）。
+      //   离线写入由 repository 的 intent/outbox 承担，这里只管调用与回显。
+
+      async createStatusDefinition(input: {
+        name: string
+        category: StatusCategoryValue
+        color?: string | null
+      }) {
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          const created = await repository.createStatusDefinition(input)
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+          return created
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: '__status_definition__', code: mapped.code } })
+          throw error
+        }
+      },
+
+      async updateStatusDefinition(input: {
+        statusId: string
+        name?: string
+        category?: StatusCategoryValue
+        color?: string | null
+      }) {
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          const updated = await repository.updateStatusDefinition(input)
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+          return updated
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: input.statusId, code: mapped.code } })
+          throw error
+        }
+      },
+
+      async reorderStatusDefinition(input: { statusId: string; rank: number }) {
+        // ★ 刻意不传 expectedVersion（集合级，见后端注释）。
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          await repository.reorderStatusDefinition(input)
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: input.statusId, code: mapped.code } })
+          throw error
+        }
+      },
+
+      async archiveStatusDefinition(input: { statusId: string; expectedVersion: number }) {
+        // 后端有引用守卫：仍被 work_items 引用时 409 `status_definition_in_use` ——
+        // 那条 message 由 resolveTaskSpaceMutationError 映射后进 state.error，
+        // 面板经 errorMessage 属性透出，**不静默吞掉**。
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          const archived = await repository.archiveStatusDefinition(input)
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+          return archived
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: input.statusId, code: mapped.code } })
           throw error
         }
       },

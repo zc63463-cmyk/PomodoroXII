@@ -206,6 +206,53 @@ export const workItemLabelSchema = z.object({
   labelId: entityId,
 }).strict()
 
+// ---- Status definition（状态双轴） ---------------------------------------
+//
+// ★ 2026-10-03（阶段 3）：`statusDefinitionSchema` 在本文件**上方已存在**
+//   （随阶段 2 的 REST 契约一起加的），此处**不重复定义**。
+//   它用 `category: z.string()` 而非 enum —— 这是**刻意**的：
+//   definitions.statuses 在 wire 上是 `z.record(z.unknown())`（开放 record），
+//   服务端可能带着我们不知道的 category（服务端先加值、客户端后升级）。
+//   真正的闭集校验在**服务端**（DB CHECK + 编译器 require_enum_value），
+//   客户端读路径不该因为一个未知 category 就整页崩掉。
+
+/** 客户端已知的 5 个 category（与后端 CHECK 一致；仅用于 UI 分组，不作校验）。 */
+export const STATUS_CATEGORY_VALUES = [
+  'not_started',
+  'in_progress',
+  'waiting',
+  'completed',
+  'cancelled',
+] as const
+export type StatusCategoryValue = (typeof STATUS_CATEGORY_VALUES)[number]
+export type StatusDefinition = z.infer<typeof statusDefinitionSchema>
+
+/** 解析 definitions.statuses 里的一行；不是合法 status 行则返回 null（不抛）。 */
+export const readStatusDefinition = (raw: unknown): StatusDefinition | null => {
+  const parsed = statusDefinitionSchema.safeParse(raw)
+  return parsed.success ? parsed.data : null
+}
+
+/**
+ * 在一个 category 内取**系统代表行**的 id。
+ *
+ * ★ 这是双轴最关键的一个前端原语：会话完成/取消、默认状态、报表锚点
+ * 全部依赖它。取"第一条"在用户自定义行 rank 更小时会拿到临时状态
+ * （后端按 (rank, id) 排序，用户新建的行的 rank 由用户自己决定）。
+ * 没有系统行时退回第一条（退化但不崩）。
+ */
+export const systemStatusIdByCategory = (
+  rows: readonly unknown[],
+  category: string,
+): string | null => {
+  const parsed = rows
+    .map(readStatusDefinition)
+    .filter((row): row is StatusDefinition => row !== null)
+    .filter((row) => row.category === category && !row.archivedAt)
+  const system = parsed.find((row) => row.system)
+  return (system ?? parsed[0])?.id ?? null
+}
+
 // ---- Dependency domain (Relation) -----------------------------------------
 
 /** Only these two readings block; ``relates_to`` is a non-blocking link. */

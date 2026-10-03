@@ -17,6 +17,27 @@ import {
   type TaskSpaceRepositoryLike,
 } from './task-space-store'
 
+/** ★ 2026-10-03（状态双轴阶段 3）：status 行的测试夹具。 */
+const statusRow = (
+  id: string,
+  name: string,
+  category: string,
+  version = 1,
+  archivedAt: string | null = null,
+) => ({
+  id,
+  name,
+  category,
+  icon: null,
+  color: null,
+  rank: 0,
+  system: false,
+  archivedAt,
+  version,
+  createdAt: '2026-07-15T08:00:00.000Z',
+  updatedAt: '2026-07-15T08:00:00.000Z',
+})
+
 const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3): CachedWorkItem => ({
   id,
   projectId: 'project-1',
@@ -107,6 +128,12 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     createLabel: vi.fn().mockResolvedValue({ id: 'label-1', name: 'Focus', color: null, archivedAt: null, version: 1, createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z' }),
     updateLabel: vi.fn().mockResolvedValue({ id: 'label-1', name: 'Renamed', color: null, archivedAt: null, version: 2, createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z' }),
     archiveLabel: vi.fn().mockResolvedValue({ id: 'label-1', name: 'Focus', color: null, archivedAt: '2026-07-15T08:00:00.000Z', version: 2, createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z' }),
+    // ★ 2026-10-03（状态双轴阶段 3）：四个 status action 的 mock。
+    //   缺一个就会因接口不满足而 TS2322 —— 那是好事：接口演进会被类型系统抓住。
+    createStatusDefinition: vi.fn().mockResolvedValue(statusRow('sys-u-1', '等设计review', 'waiting')),
+    updateStatusDefinition: vi.fn().mockResolvedValue(statusRow('sys-u-1', '等设计评审', 'waiting', 2)),
+    reorderStatusDefinition: vi.fn().mockResolvedValue(undefined),
+    archiveStatusDefinition: vi.fn().mockResolvedValue(statusRow('sys-u-1', '等设计评审', 'waiting', 3, '2026-07-16T08:00:00.000Z')),
     resumePendingDirectCommandIntents: vi.fn().mockResolvedValue({ failed: [] }),
     ...overrides,
   }

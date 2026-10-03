@@ -25,6 +25,12 @@ const INTENT_KIND_LABELS: Record<string, string> = {
   add_work_item_labels: '添加标签',
   remove_work_item_labels: '移除标签',
   create_label: '新建标签',
+  // ★ 2026-10-03（状态双轴阶段 3）：失败摘要要能说清是哪个 status 操作挂了，
+  //   否则用户只看到「操作失败」，不知道该回哪个状态上重试。
+  create_status_definition: '新建状态',
+  update_status_definition: '修改状态',
+  reorder_status_definition: '调整状态顺序',
+  archive_status_definition: '归档状态',
   update_label: '编辑标签',
   archive_label: '归档标签',
   submit_review: '提交复盘',

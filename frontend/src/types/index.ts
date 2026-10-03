@@ -515,7 +515,7 @@ export type SyncedTimeBlock = TimeBlock & SyncFields
 
 // Final Task Space / FocusSession cache rows. Wire space identity is checked
 // before persistence and omitted from per-Space business rows.
-import type { WorkItemDepth, WorkItemNoteDocument, Project, WorkItem, Label } from '@/lib/contracts/task-space'
+import type { WorkItemDepth, WorkItemNoteDocument, Project, WorkItem, Label, StatusDefinition } from '@/lib/contracts/task-space'
 import type {
   FocusSessionView,
   SessionAttributionRevisionView,
@@ -547,6 +547,11 @@ export type CachedWorkItem = Omit<WorkItem, 'spaceId'> & {
 // repeat space identity (shared definitions endpoint); keep the cached row
 // shape identical to the label contract.
 export type CachedLabel = Label
+/**
+ * 状态双轴：status 行的本地形态 =契约形态（同 label）。
+ * 区别在于它由服务端权威维护，前端不乐观改写（见 store 的四个 action 注释）。
+ */
+export type CachedStatusDefinition = StatusDefinition
 export interface CachedWorkItemNote {
   noteId: string
   workItemId: string
@@ -632,7 +637,7 @@ export interface SessionActivationApplicationReceiptRow {
 
 export interface DirectCommandIntentRow {
   operationId: string
-  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'trash_work_item' | 'restore_work_item' | 'create_relation' | 'remove_relation' | 'resolve_relation' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'add_work_item_labels' | 'remove_work_item_labels'
+  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'trash_work_item' | 'restore_work_item' | 'create_relation' | 'remove_relation' | 'resolve_relation' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'create_status_definition' | 'update_status_definition' | 'reorder_status_definition' | 'archive_status_definition' | 'add_work_item_labels' | 'remove_work_item_labels'
   spaceId: string
   targetId: string | null
   requestJson: string

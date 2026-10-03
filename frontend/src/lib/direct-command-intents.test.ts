@@ -51,6 +51,13 @@ function noopHandlers(executeProject: (intent: DirectCommandIntentRow) => Promis
     update_label: { executeExact: async () => undefined },
     archive_label: { executeExact: async () => undefined },
     submit_review: { executeExact: async () => undefined },
+    // ★ 2026-10-03（状态双轴阶段 3）：DirectCommandHandlerMap 是
+    //    —— **穷举**而非 Partial，所以每处
+    //   handlerMap 都必须列全。新增 kind 时编译器会在这里报缺失（好事）。
+    create_status_definition: { executeExact: async () => undefined },
+    update_status_definition: { executeExact: async () => undefined },
+    reorder_status_definition: { executeExact: async () => undefined },
+    archive_status_definition: { executeExact: async () => undefined },
   }
 }
 
@@ -110,6 +117,10 @@ describe('durable direct command intents', () => {
       update_label: { executeExact: async () => undefined },
       archive_label: { executeExact: async () => undefined },
       submit_review: { executeExact: async () => undefined },
+      create_status_definition: { executeExact: async () => undefined },
+      update_status_definition: { executeExact: async () => undefined },
+      reorder_status_definition: { executeExact: async () => undefined },
+      archive_status_definition: { executeExact: async () => undefined },
     })
 
     expect(calls).toHaveLength(2)

@@ -116,8 +116,26 @@ export default function TasksPage() {
 
   // Status ids are Space-scoped definitions, never hardcoded: the backend
   // owns the status machine and a Space may rename or re-categorise entries.
+  //
+  // ★ 2026-10-03（状态双轴阶段 3）：**优先 system 行**。
+  //   阶段 2 开放用户自定义 status 后，同一 category 下有多条 status，
+  //   而后端按 (rank, id) 排序 —— 「取第一条」在用户行的 rank 更小时会拿到
+  //   用户行（例如「等设计review」），而这里的调用点是会话完成/取消的
+  //   语义锚点（`completedStatusId` / `cancelledStatusId`），**必须钉在系统行上**，
+  //   否则一次专注结束可能把工作项标成一个临时状态。
+  //   与后端 `focus_session/policy.py:1063` 「按 id 查再验 category」的思路一致。
   const statusIdByCategory = (category: string): string | null => {
-    for (const status of definitions?.statuses ?? []) {
+    const rows = definitions?.statuses ?? []
+    for (const status of rows) {
+      const record = status as Record<string, unknown>
+      if (
+        record.category === category &&
+        record.system === true &&
+        typeof record.id === 'string'
+      )
+        return record.id
+    }
+    for (const status of rows) {
       const record = status as Record<string, unknown>
       if (record.category === category && typeof record.id === 'string') return record.id
     }
