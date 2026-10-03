@@ -41,10 +41,11 @@ def _wire_value(value):
 #   入站 push 仍按 WORK_ITEM_SYNC_FIELDS 精确相等 —— 客户端构造 post-image 时
 #   必须剔除它；而服务端落库行 / sync 事件 / 返回值必须携带它（完整行形状）。
 PRE_WAITING_FIELD = "pre_waiting_status_definition_id"
-# ★ 2026-10-03（space_018）：due_at 出站按模型驱动全列带出（行形状闸门要求）；
-#   本文件的老客户端 candidate（_sync_candidate）不携带它，服务端从真实前像
-#   继承补齐 ⇒ 服务端返回值 / 事件 = candidate + {PRE_WAITING_FIELD, DUE_AT_FIELD}。
-#   工单②把 due_at 放行入站后：新客户端可自带，本文件的剔除形态仍合法（继承）。
+# ★ 2026-10-03（space_018 / 工单②）：due_at 已进 WORK_ITEM_SYNC_FIELDS（路径 3：
+#   允许缺失 + 前像继承 + extra 仍拒）。本文件的老客户端 candidate
+#   （_sync_candidate）不携带它 ⇒ 服务端返回值 / 事件 = candidate +
+#   {PRE_WAITING_FIELD, DUE_AT_FIELD}（due_at 为继承值）。
+#   新客户端显式携带 due_at 的正向面由专用测试覆盖（见「路径 3」一节）。
 DUE_AT_FIELD = "due_at"
 
 
@@ -193,20 +194,124 @@ async def test_sync_move_replay_applies_source_rank_against_diverged_target(
 
 
 @pytest.mark.asyncio
-async def test_sync_work_item_incomplete_post_image_is_fail_closed(
+async def test_sync_work_item_post_image_missing_field_is_inherited(
     task_space_fixture,
 ) -> None:
-    """A sync update with an incomplete post-image (missing a required field)
-    must be rejected with zero side effects."""
-    item = await task_space_fixture.seed_level2("sync-incomplete-post-image")
+    """★ 2026-10-03（space_018 / 工单②·路径 3）：入站从「精确相等」放宽为
+    「允许缺失」—— 老客户端 post-image 缺失字段 ⇒ 仍被接受，缺失字段从真实
+    前像继承服务端权威值；显式给出的字段照常生效。
+
+    取代原 ``test_sync_work_item_incomplete_post_image_is_fail_closed``：
+    「缺失即拒」被路径 3 裁决反转；fail-closed 收缩到「多带未知字段」
+    （见 test_sync_work_item_post_image_extra_field_is_fail_closed 与
+    test_task_space_waiting_prior_state 的 pre_waiting extra 反例断言）。
+    """
+    item = await task_space_fixture.seed_level2("sync-inherit-missing")
+    # 先用 typed 命令给该行一个非空 due_at：继承保留的必须是**服务端现值**，
+    # 而不是「悄悄清空」。
+    await task_space_fixture.update_work_item(
+        "sync-inherit-missing-due",
+        str(item["id"]),
+        int(item["version"]),
+        {"due_at": "2026-10-05T00:00:00Z"},
+    )
+    row = await task_space_fixture.read_work_item(str(item["id"]))
+    assert row["due_at"] == "2026-10-05T00:00:00Z"
+
     client_updated_at = task_space_fixture.clock.tick()
+    # 老客户端 post-image：_sync_candidate 剥掉 pre_waiting 与 due_at，
+    # 再显式删掉 description —— 缺失两个字段仍必须被接受。
+    candidate = _sync_candidate(
+        row,
+        title="Legacy client rename",
+        updated_at=client_updated_at,
+        version=int(row["version"]) + 1,
+    )
+    assert "due_at" not in candidate
+    del candidate["description"]
+    print("[path-3] old-client post-image =", repr(candidate))
+    event = task_space_fixture.sync_event(
+        entity_type="workItem",
+        entity_id=str(item["id"]),
+        action="update",
+        payload=candidate,
+        expected_version=int(row["version"]),
+        client_updated_at=client_updated_at,
+    )
+    request = task_space_fixture.entity_commands.from_sync_event(
+        task_space_fixture.scope, event
+    )
+
+    result = await task_space_fixture.uow.execute(
+        task_space_fixture.scope, request, "sync-inherit-missing-op"
+    )
+    print("[path-3] accepted value due_at =", repr(result.value["due_at"]))
+
+    assert result.value["title"] == "Legacy client rename"
+    assert result.value["due_at"] == "2026-10-05T00:00:00Z"  # 继承，未丢
+    assert result.value["description"] == row["description"]  # 继承
+    persisted = await task_space_fixture.read_work_item(str(item["id"]))
+    assert persisted["due_at"] == "2026-10-05T00:00:00Z"
+    assert persisted["title"] == "Legacy client rename"
+
+
+@pytest.mark.asyncio
+async def test_sync_work_item_new_client_post_image_writes_due_at(
+    task_space_fixture,
+) -> None:
+    """路径 3 的正向面：新客户端 post-image 显式携带 due_at ⇒ 正常写入。"""
+    item = await task_space_fixture.seed_level2("sync-new-client-due")
+    client_updated_at = task_space_fixture.clock.tick()
+    due = "2026-10-06T00:00:00Z"
     candidate = _sync_candidate(
         item,
-        title="Incomplete",
+        title="New client sets due",
         updated_at=client_updated_at,
         version=int(item["version"]) + 1,
     )
-    del candidate["description"]  # required full post-image field removed
+    # _sync_candidate 按老客户端形态剥离 due_at；新客户端显式带它 ⇒ 补回。
+    candidate[DUE_AT_FIELD] = due
+    print("[path-3] new-client post-image due_at =", repr(candidate[DUE_AT_FIELD]))
+    event = task_space_fixture.sync_event(
+        entity_type="workItem",
+        entity_id=str(item["id"]),
+        action="update",
+        payload=candidate,
+        expected_version=int(item["version"]),
+        client_updated_at=client_updated_at,
+    )
+    request = task_space_fixture.entity_commands.from_sync_event(
+        task_space_fixture.scope, event
+    )
+
+    result = await task_space_fixture.uow.execute(
+        task_space_fixture.scope, request, "sync-new-client-due-op"
+    )
+
+    assert result.value["due_at"] == due
+    persisted = await task_space_fixture.read_work_item(str(item["id"]))
+    assert persisted["due_at"] == due
+
+
+@pytest.mark.asyncio
+async def test_sync_work_item_post_image_extra_field_is_fail_closed(
+    task_space_fixture,
+) -> None:
+    """路径 3 只放宽「缺失」，绝不放宽「多带」：未知字段 ⇒
+    ``full_post_image_required`` 拒绝且零副作用。
+
+    与 ``test_sync_work_item_post_image_missing_field_is_inherited`` 成对：
+    放宽后的安全边界 = 「缺的继承、多的照拒」。
+    """
+    item = await task_space_fixture.seed_level2("sync-extra-field")
+    client_updated_at = task_space_fixture.clock.tick()
+    candidate = _sync_candidate(
+        item,
+        title="Smuggled",
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+        snooze_until="2026-10-06T00:00:00Z",  # 未知字段 —— 任何阶段都不得入站
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -222,13 +327,16 @@ async def test_sync_work_item_incomplete_post_image_is_fail_closed(
 
     with pytest.raises(MutationRejectedError) as caught:
         await task_space_fixture.uow.execute(
-            task_space_fixture.scope, request, "sync-incomplete-post-image-op"
+            task_space_fixture.scope, request, "sync-extra-field-op"
         )
 
-    assert caught.value.rejection.code == "work_item_structure_changed"
+    rejection = caught.value.rejection
+    assert rejection.code == "work_item_structure_changed"
+    assert rejection.details["reason"] == "full_post_image_required"
+    assert "snooze_until" in rejection.details["extra"]
     assert task_space_fixture.overlay_snapshot() == before
     assert await task_space_fixture.visible_events(
-        operation_id="sync-incomplete-post-image-op"
+        operation_id="sync-extra-field-op"
     ) == ()
 
 
@@ -340,7 +448,10 @@ def _sync_fields_subset(mapping: Mapping[str, object]) -> dict[str, object]:
     from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS
 
     return {
-        field: _wire_value(mapping[field])
+        # ★ space_018 / 路径 3：用 .get 而非 [] —— 老客户端 candidate
+        #   （_sync_candidate）允许缺失后加字段（首例 due_at），缺省按 None
+        #   参与投影，语义 = 「该字段由服务端从前像继承」。
+        field: _wire_value(mapping.get(field))
         for field in sorted(WORK_ITEM_SYNC_FIELDS)
     }
 

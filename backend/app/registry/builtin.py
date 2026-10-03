@@ -531,8 +531,7 @@ REGISTRY.register(EntitySpec(
         # ★ 2026-10-03（space_018）：截止日期列。必须出现在 FieldSpec —— 行形状
         #   校验要求 set(row) == set(spec.field_names)（mutation/unit_of_work.py
         #   的完整行 / 持久化计划行 / sync 事件期望字段三处），漏加会让带列的
-        #   DB 行在编译或恢复时报结构错误。注意：登记 FieldSpec ≠ 进
-        #   WORK_ITEM_SYNC_FIELDS（入站 push 仍精确相等，本阶段只出不进）。
+        #   DB 行在编译或恢复时报结构错误。工单②起同时进 WORK_ITEM_SYNC_FIELDS。
         FieldSpec("due_at", "datetime", nullable=True),
     ),
     sync_entity_type="workItem",

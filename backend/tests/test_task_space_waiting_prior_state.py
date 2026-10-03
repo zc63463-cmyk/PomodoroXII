@@ -37,8 +37,10 @@ def _wire_value(value):
 
 def _sync_candidate(item: Mapping[str, object], **changes: object) -> dict:
     """Client outbound post-image: the inbound contract stays exact — strip the
-    server-owned columns (the pre-waiting column is never uploaded by a client;
-    ★ space_018: due_at rides outbound until 工单② opens the inbound whitelist)."""
+    server-owned pre-waiting column (it is never uploaded by a client).
+
+    ★ space_018 / 工单②：due_at 已进 WORK_ITEM_SYNC_FIELDS（路径 3）。继续剥离
+    它＝模拟老客户端形态：入站缺失合法（服务端从前像继承）。"""
     candidate = {**item, **changes}
     candidate.pop(PRE_WAITING, None)
     candidate.pop("due_at", None)

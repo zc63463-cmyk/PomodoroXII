@@ -214,7 +214,8 @@ WORK_ITEM_SYNC_FIELDS = frozenset({
     "id", "project_id", "display_key", "title", "description",
     "type_definition_id", "status_definition_id", "priority", "parent_id",
     "child_rank", "completion_window_start", "completion_window_end",
-    "review_point", "hard_deadline", "effort_estimate_lower_seconds",
+    "review_point", "hard_deadline", "due_at",
+    "effort_estimate_lower_seconds",
     "effort_estimate_upper_seconds", "effort_actual_seconds", "confidence",
     "completed_at", "cancelled_at", "archived_at", "marked_as_attention",
     "created_at", "updated_at", "version", "label_ids",
@@ -243,7 +244,8 @@ WORK_ITEM_SCALAR_FIELDS = frozenset({
     "marked_as_attention",
     # ★ 2026-10-03（space_018）：截止日期。在 SCALAR 白名单 ⇒ 在线 PATCH 可写
     #   （routes 层显式字段表 + sync 重放的 scalar 家族变更归属都经这里）。
-    #   注意这仍不是 WORK_ITEM_SYNC_FIELDS —— 入站全量 post-image 本阶段不带它。
+    #   工单②起它同时在 WORK_ITEM_SYNC_FIELDS：入站全量 post-image 缺失时
+    #   服务端从真实前像继承（路径 3），显式携带则正常写入。
     "due_at",
 })
 WORK_ITEM_MOVE_FIELDS = frozenset({"project_id", "parent_id", "child_rank"})
@@ -1080,6 +1082,7 @@ def _typed_sync_request(
 
 
 def _full_work_item_sync_candidate(
+    context,
     request: MutationRequest,
     before: Mapping[str, object],
 ) -> dict[str, object]:
@@ -1087,11 +1090,20 @@ def _full_work_item_sync_candidate(
 
     expected_payload_fields = WORK_ITEM_SYNC_FIELDS - {"id"}
     actual_fields = set(request.payload)
-    if actual_fields != expected_payload_fields:
+    missing_fields = expected_payload_fields - actual_fields
+    extra_fields = actual_fields - expected_payload_fields
+    # ★ 2026-10-03（space_018 / 路径 3）：入站从「精确相等」放宽为「允许缺失」。
+    #   协议没有 schema 版本协商（/sync/v2/* 全链路零版本参数），due_at 进白名单
+    #   后，未升级客户端的 post-image 必然缺它 —— 缺失字段从真实前像继承服务端
+    #   权威值（老客户端照常被接受），带齐的新客户端走全量校验。
+    #   「多带」绝不放宽：extra 仍按 full_post_image_required 拒绝
+    #   （pre_waiting_status_definition_id 等服务端自持字段依赖入站即拒，
+    #   见 test_task_space_waiting_prior_state 的 extra 反例断言 —— 红线）。
+    if extra_fields:
         _reject_work_item_sync(
             "full_post_image_required",
-            missing=sorted(expected_payload_fields - actual_fields),
-            extra=sorted(actual_fields - expected_payload_fields),
+            missing=sorted(missing_fields),
+            extra=sorted(extra_fields),
         )
     # ★ 2026-09-11：sync post-image（外部客户端 / 离线行）的 priority /
     # confidence 也必须在编译前 fail-closed。离线设备可能带着本地自由文本
@@ -1118,6 +1130,16 @@ def _full_work_item_sync_candidate(
         _reject_work_item_sync("invalid_candidate_version")
     if candidate["updated_at"] != request.client_updated_at:
         _reject_work_item_sync("updated_at_not_client_timestamp")
+    # 路径 3 的继承发生在全部 CAS/形态校验之后：before 的版本一致性已被证明，
+    # 缺失字段才允许原样继承。label_ids 是虚拟投影列（无 DB 行可取），从
+    # junction 表取服务端权威投影；其余字段取真实前像。
+    for field in missing_fields:
+        if field == "label_ids":
+            candidate[field] = _label_ids_for_work_item(
+                context.authority, request.entity_id
+            )
+        else:
+            candidate[field] = before[field]
     return candidate
 
 
@@ -1126,7 +1148,7 @@ async def _compile_sync_work_item(self, context, request):
         _reject_formal_sync(request, "typed_create_or_delete_required")
 
     before = _require_row(context.authority, "work_item", request.entity_id)
-    candidate = _full_work_item_sync_candidate(request, before)
+    candidate = _full_work_item_sync_candidate(context, request, before)
     # The before image is the DB row (no label_ids column); project the
     # server-authoritative junction labels onto it for change detection.
     before_projected = {
@@ -1263,21 +1285,13 @@ async def _compile_sync_work_item(self, context, request):
     # cancelled_at / child_rank.  label_ids is a virtual projection field: it
     # travels in the sync event post-image but never in a work_items row.
     after = {key: value for key, value in candidate.items() if key != "label_ids"}
-    # ★ 2026-10-03（space_018）：due_at 已是 DB 列 + FieldSpec（行形状校验要求
-    #   set(row) == set(spec.field_names)），但本阶段不在 WORK_ITEM_SYNC_FIELDS
-    #   —— 上行 post-image 不携带（携带即拒 full_post_image_required），落库行
-    #   与 sync 事件 payload 必须从真实前像继承（服务端自持，照 pre_waiting 的
-    #   「只出站」处理范式）。进白名单后 candidate 会携带它，setdefault 让
-    #   两种形态共用一处代码、后到的显式值不被继承值覆盖。
-    after.setdefault("due_at", before["due_at"])
+    # ★ 2026-10-03（space_018 / 工单②）：due_at 已进 WORK_ITEM_SYNC_FIELDS ——
+    #   老客户端缺失时由 _full_work_item_sync_candidate 从真实前像继承，
+    #   candidate 恒携带完整字段集，落库行与事件 payload 无需再单独补列。
     # ★ 2026-09-12（ADR-0003）：落库行与 sync 事件 payload 都必须携带服务端自持的
     #   pre_waiting 列（行形状校验要求 set(row) == spec.field_names）。
     after[PRE_WAITING_STATUS_FIELD] = pre_waiting_status
-    event_payload = {
-        **dict(candidate),
-        "due_at": after["due_at"],
-        PRE_WAITING_STATUS_FIELD: pre_waiting_status,
-    }
+    event_payload = {**dict(candidate), PRE_WAITING_STATUS_FIELD: pre_waiting_status}
     plan = DbMutationPlan(
         "work_items", {"id": after["id"]}, "update",
         request.expected_version, before, after,

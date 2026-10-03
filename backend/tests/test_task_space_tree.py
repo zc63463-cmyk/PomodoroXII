@@ -42,9 +42,9 @@ def _sync_candidate(item: Mapping[str, object], **changes: object) -> dict:
     columns but the inbound push contract stays exact — strip them here."""
     candidate = {**item, **changes}
     candidate.pop(PRE_WAITING_FIELD, None)
-    # ★ 2026-10-03（space_018）：due_at 本阶段只出不进 —— 出站事件按模型驱动
-    #   全列带出，入站白名单（WORK_ITEM_SYNC_FIELDS）尚未放行，携带即拒。
-    #   工单②放行入站后本剔除仍合法（老客户端形态，缺省由服务端继承）。
+    # ★ 2026-10-03（space_018 / 工单②）：due_at 已进 WORK_ITEM_SYNC_FIELDS。
+    #   本 helper 继续剥离它 —— 这正是「老客户端」形态：入站缺失合法（路径 3
+    #   服务端从前像继承），且与显式携带的新客户端形态共用同一套校验。
     candidate.pop("due_at", None)
     return candidate
 
@@ -84,14 +84,14 @@ WORK_ITEM_POST_IMAGE_FIELDS = {
 }
 
 
-# ★ 2026-10-03（space_018）：due_at 出站已带（模型驱动全列 + 行形状闸门要求），
-#   但 018 阶段入站白名单尚未放行。工单②把它加进 WORK_ITEM_SYNC_FIELDS 后
-#   本集合必须改为空集 —— 该不变量会随之收紧。
-WORK_ITEM_INBOUND_PENDING_FIELDS = {"due_at"}
+# ★ 2026-10-03（space_018 工单②）：due_at 已进 WORK_ITEM_SYNC_FIELDS（路径 3：
+#   允许缺失 + 前像继承 + extra 仍拒）⇒ 待放行集合收空，不变量恢复为
+#   「入站白名单 + 等待前态 = 出站字段集」。
+WORK_ITEM_INBOUND_PENDING_FIELDS: set[str] = set()
 
 
 def test_work_item_sync_candidate_shape_matches_every_ts0_post_image_field() -> None:
-    # 出站字段集 = 入站白名单 + 等待前态（永久只出站）+ 本阶段待放行字段。
+    # 出站字段集 = 入站白名单 + 等待前态（永久只出站）+ 待放行字段（应为空）。
     # 不允许出现任何其它未知出站字段。
     assert (
         WORK_ITEM_SYNC_FIELDS | {PRE_WAITING_FIELD} | WORK_ITEM_INBOUND_PENDING_FIELDS
