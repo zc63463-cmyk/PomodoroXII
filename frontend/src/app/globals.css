@@ -1109,13 +1109,36 @@
   min-height: 0;
   gap: 8px;
 }
+/* ── 头栏三段式（2026-10-03 真机回归：窄容器下标题被压成竖排 4 行）──────
+   旧实现：标题 / 计数 / tab 组 / 键位提示**同处一行**，靠 `margin-left:auto`
+   把键位提示推到最右。容器一窄，这条横排就挤不下 —— flex 逐项收缩，
+   标题里的汉字被逐字折行（每行 2 字），tab 组被裁切。
+   现在：**头栏本身是纵向三段**，段内各自成行且不换行：
+     ① 标题 + 计数  ② 视图切换（可横向滚动）  ③ 键位提示
+   `flex-shrink:0` 只在**段内**生效，不再让整条横排互相挤压。 */
 .wm-editor-hd {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   font-size: 12px;
   color: var(--ios-label-2);
   flex-shrink: 0;
+}
+/* 段容器：标题行等 —— 内部横向排列，成员不换行不收缩 */
+.wm-editor-hd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+/* 标题：单行、永不折行（折行是本次回归的核心症状） */
+.wm-editor-title {
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-weight: 500;
+  color: var(--ios-label);
 }
 .wm-editor-count {
   font-size: 10.5px;
@@ -1123,6 +1146,14 @@
   border: 1px solid var(--ios-sep);
   border-radius: 999px;
   padding: 0 7px;
+  white-space: nowrap;
+}
+/* 横向滚动容器：子岛多时自己滚，不撑破父容器 */
+.scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  scrollbar-width: thin;
 }
 /* ── 键盘心流提示（PXII-FEAT-KEYMAP-FLOW）──────────────────────────────────
    键位提示行与 `.wm-editor-hd` 同排：**只在可编辑（传了 onEdit）时渲染**。
@@ -1131,7 +1162,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-left: auto;
+  max-width: 100%;
   font-size: 10.5px;
   color: var(--ios-label-3);
 }
@@ -1292,7 +1323,7 @@
   border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
   border-radius: 8px;
   overflow: hidden;
-  margin-left: 6px;
+  max-width: 100%;
 }
 .wm-sub-island-banner {
   position: absolute;
@@ -1908,6 +1939,16 @@
 .wm-view-btn[aria-pressed='true'] {
   background: var(--ios-blue);
   color: #fff;
+}
+/* tab 标题：单行省略。宽度由 flex 分配（min-width:0 才能真正收缩）——
+   JS 硬截断会在最易歧义的字尾处砍断（如「导图实测改名实验」→「…改名实…」）。 */
+.wm-view-btn-label {
+  display: inline-block;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 /* 归档岛卡片：虚线描边 + 浅底 —— 纯投影切片，与真实岛（实线）区分 */
 .wm-island--archive .wm-box {

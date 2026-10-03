@@ -918,15 +918,23 @@ export function TimerMapEditor({
       data-testid="timer-map-editor"
       onKeyDown={editable ? handleKeyDown : undefined}
     >
+      {/*
+        头栏三段式（2026-10-03 真机回归）：
+        标题 / 视图切换 / 键位提示改为**各自独立成行**，段内各自不换行。
+        旧实现三者同处一行，靠 `margin-left:auto` 推挤 —— 窄容器下
+        标题被压成竖排 4 行、tab 组被裁切（用户截图）。
+      */}
       <div className="wm-editor-hd">
-        <span>工作导图 · 本次会话</span>
-        {island !== null ? (
-          <span className="wm-editor-count">{island.nodes.length} 项</span>
-        ) : null}
+        <div className="wm-editor-hd-row">
+          <span className="wm-editor-title">工作导图 · 本次会话</span>
+          {island !== null ? (
+            <span className="wm-editor-count shrink-0">{island.nodes.length} 项</span>
+          ) : null}
+        </div>
         {/* 子岛视图切换（会话全局岛视图 vs L3子任务岛视图） */}
         {island !== null && island.subIslands && island.subIslands.length > 0 ? (
           <div
-            className="wm-sub-island-toggle"
+            className="wm-sub-island-toggle scroll-x"
             role="group"
             aria-label="导图视图切换"
             data-testid="map-sub-island-toggle"
@@ -964,7 +972,11 @@ export function TimerMapEditor({
                 >
                   {isCurrent ? '⚡ ' : '🏝️ '}
                   {`${idx + 1}. `}
-                  {sub.title.length > 7 ? `${sub.title.slice(0, 7)}…` : sub.title}
+                  {/* 文案**不再硬截断**：JS 截断会让「导图实测改名实验」这种长名
+                      在 tab 上变成「导图实测改名实…」，而「实…」恰是最容易引起
+                      歧义的字尾。改为 CSS 单行省略（宽度由 flex 决定），
+                      全文交给 title/aria-label 兜底。 */}
+                  <span className="wm-view-btn-label">{sub.title}</span>
                   {isCurrent ? ' (专注中)' : ''}
                 </button>
               )
@@ -972,7 +984,7 @@ export function TimerMapEditor({
           </div>
         ) : null}
         {editable && island !== null ? (
-          <span className="wm-editor-keys" data-testid="map-key-hints">
+          <span className="wm-editor-keys shrink-0" data-testid="map-key-hints">
             {EDITOR_KEY_HINTS.map((hint) => (
               <span key={hint.keys} className="wm-key-hint">
                 <kbd>{hint.keys}</kbd>
