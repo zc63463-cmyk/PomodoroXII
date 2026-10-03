@@ -6,7 +6,7 @@ export interface SpaceCommandBase { spaceId: string; operationId: string }
 export interface CreateProjectInput extends SpaceCommandBase { name: string; key: string; description?: string | null }
 // ★ 2026-09-11：priority 收紧到与后端同源的值域，调用方无法再传自由文本。
 export interface CreateWorkItemInput extends SpaceCommandBase { projectId: string; title: string; description: string | null; parentId: string | null; typeDefinitionId: string | null; statusDefinitionId: string | null; priority: WorkItemPriority | null }
-export interface UpdateWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; title?: string; description?: string | null; priority?: WorkItemPriority | null; typeDefinitionId?: string | null }
+export interface UpdateWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; title?: string; description?: string | null; priority?: WorkItemPriority | null; typeDefinitionId?: string | null; dueAt?: string | null }
 export interface MoveWorkItemInput extends SpaceCommandBase { projectId: string; workItemId: string; expectedVersion: number; newParentId: string | null }
 export interface TransitionWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; statusDefinitionId: string }
 export interface ReplaceNoteInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; document: WorkItemNoteDocument }
@@ -139,8 +139,11 @@ export const taskSpaceApi = {
     if (input.description !== undefined) patch.description = input.description
     if (input.priority !== undefined) patch.priority = input.priority
     if (input.typeDefinitionId !== undefined) patch.type_definition_id = input.typeDefinitionId
+    // ★ 2026-10-03（space_018）：截止日期。显式 null = 清除；省略 = 不动 ——
+    // 与后端路由的 model_fields_set 过滤语义逐字对应（哈希只覆盖显式给出的字段）。
+    if (input.dueAt !== undefined) patch.due_at = input.dueAt
     return command(input.operationId, input.spaceId,
-      { expectedVersion: input.expectedVersion, title: input.title, description: input.description, priority: input.priority, typeDefinitionId: input.typeDefinitionId },
+      { expectedVersion: input.expectedVersion, title: input.title, description: input.description, priority: input.priority, typeDefinitionId: input.typeDefinitionId, dueAt: input.dueAt },
       // ★ 2026-09-11：共享构造器，保证与后端哈希输入逐字一致（不含 depth）。
       workItemPatchBusinessPayload(patch),
       (body, options) => spaceApi.patch(`/work-items/${encodeURIComponent(input.workItemId)}`, body, options),

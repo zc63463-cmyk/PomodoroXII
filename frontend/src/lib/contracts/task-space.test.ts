@@ -95,7 +95,7 @@ const wireItem = (priority: unknown, confidence: unknown = null) => ({
   description: null, typeDefinitionId: 't1', statusDefinitionId: 'st1',
   priority, parentId: null, childRank: 0,
   completionWindowStart: null, completionWindowEnd: null, reviewPoint: null,
-  hardDeadline: null, effortEstimateLowerSeconds: null, effortEstimateUpperSeconds: null,
+  hardDeadline: null, dueAt: null, effortEstimateLowerSeconds: null, effortEstimateUpperSeconds: null,
   effortActualSeconds: 0, confidence, completedAt: null, cancelledAt: null,
   archivedAt: null, markedAsAttention: false, labelIds: [], version: 1,
   createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z',
@@ -137,6 +137,28 @@ describe('WorkItem enum domains', () => {
     }
     expect(workItemSchema.parse(wireItem('high', null)).confidence).toBeNull()
     expect(() => workItemSchema.parse(wireItem(null, '很确定'))).toThrow()
+  })
+})
+
+/**
+ * ★ 2026-10-03（space_018）due_at 契约：服务端只校验长度不校验值域 ⇒ 读契约
+ * 同宽（本地日期键 "YYYY-MM-DD" 是 UI 约定，不是 schema 约束）。
+ * optional：旧本地 Dexie 行没有它 —— undefined 与 null 同样是「无截止」。
+ */
+describe('WorkItem dueAt contract', () => {
+  it('accepts a local date key and null', () => {
+    expect(workItemSchema.parse({ ...wireItem('high'), dueAt: '2026-10-05' }).dueAt).toBe('2026-10-05')
+    expect(workItemSchema.parse(wireItem('high')).dueAt).toBeNull()
+  })
+
+  it('tolerates missing dueAt (legacy local row)', () => {
+    const { dueAt: _omitted, ...legacy } = wireItem('high')
+    void _omitted
+    expect(workItemSchema.parse(legacy).dueAt).toBeUndefined()
+  })
+
+  it('rejects oversized values (server length guarantee mirrored)', () => {
+    expect(() => workItemSchema.parse({ ...wireItem('high'), dueAt: 'x'.repeat(65) })).toThrow()
   })
 })
 

@@ -78,6 +78,8 @@ export interface TaskSpaceRepositoryLike {
     description?: string | null
     priority?: WorkItemPriority | null
     typeDefinitionId?: string | null
+    /** ★ space_018：截止日期（本地日期键 YYYY-MM-DD；显式 null 清除）。 */
+    dueAt?: string | null
   }) => Promise<CachedWorkItem>
   moveWorkItem: (input: {
     projectId: string
@@ -216,6 +218,8 @@ export interface TaskSpaceActions {
     description?: string | null
     priority?: WorkItemPriority | null
     typeDefinitionId?: string | null
+    /** ★ space_018：截止日期（本地日期键 YYYY-MM-DD；显式 null 清除）。 */
+    dueAt?: string | null
   }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>

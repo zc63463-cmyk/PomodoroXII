@@ -114,6 +114,12 @@ export const workItemSchema = z.object({
   completionWindowEnd: utc.nullable(),
   reviewPoint: utc.nullable(),
   hardDeadline: utc.nullable(),
+  // ★ 2026-10-03（space_018）：截止日期。服务端只校验长度不校验值域 ⇒ 读契约
+  // 同宽（不写 utc 正则）。optional：旧本地 Dexie 行没有它；语义上 undefined 与
+  // null 同样是「无截止」（照 preWaitingStatusDefinitionId 的先例）。
+  // 值格式 = 本地日期键 "YYYY-MM-DD"（用户语义是「哪天要」，不是时刻，
+  // 纯日期字符串比较无时区坑）。
+  dueAt: z.string().max(64).nullable().optional(),
   effortEstimateLowerSeconds: z.number().int().nonnegative().nullable(),
   effortEstimateUpperSeconds: z.number().int().nonnegative().nullable(),
   effortActualSeconds: z.number().int().nonnegative(),
@@ -382,6 +388,7 @@ export function taskSpaceEntityBusinessPayloadForHash(
         completion_window_start: row.completionWindowStart,
         completion_window_end: row.completionWindowEnd,
         review_point: row.reviewPoint, hard_deadline: row.hardDeadline,
+        due_at: row.dueAt ?? null,
         effort_estimate_lower_seconds: row.effortEstimateLowerSeconds,
         effort_estimate_upper_seconds: row.effortEstimateUpperSeconds,
         effort_actual_seconds: row.effortActualSeconds, confidence: row.confidence,

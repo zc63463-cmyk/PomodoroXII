@@ -406,6 +406,8 @@ export class TaskSpaceRepository {
     // ★ 2026-09-11：与 create 同一受限值域。
     priority?: WorkItemPriority | null
     typeDefinitionId?: string | null
+    /** ★ space_018：截止日期（本地日期键 YYYY-MM-DD；显式 null 清除）。 */
+    dueAt?: string | null
   }) {
     if (!online()) throw new Error('offline_formal_mutation_forbidden')
     const cached = await this.db.workItems.get(input.workItemId)

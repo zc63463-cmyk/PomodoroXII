@@ -16,6 +16,10 @@ import { ProjectRail } from '@/components/task-space/project-rail'
 // ★ 2026-10-03（状态双轴阶段 3收尾）：状态定义管理面板的入口。
 //   组件本身在 stage 3 已完成并有18 个测试，此前只缺页面挂载。
 import { StatusDefinitionPanel } from '@/components/task-space/status-definition-panel'
+// ★ 2026-10-03（space_018 工单③）：日期视图（今日到期 / 逾期）。
+//   口径在 lib/task-space/due-date-selectors（本地日期键 + 字符串比较，单测钉死）。
+import { DueDatePanel } from '@/components/task-space/due-date-panel'
+import { bucketDueDates, localTodayKey } from '@/lib/task-space/due-date-selectors'
 import { LaunchSessionButton } from '@/components/task-space/launch-session-button'
 import { WorkItemDetail } from '@/components/task-space/work-item-detail'
 import { ActiveChildConflictDialog } from '@/components/task-space/active-child-conflict-dialog'
@@ -122,6 +126,8 @@ export default function TasksPage() {
   //   树挤到不可用宽度。抽屉按需覆盖，关闭后布局原样。
   const [statusPanelOpen, setStatusPanelOpen] = useState(false)
   const [statusPanelError, setStatusPanelError] = useState<string | null>(null)
+  // ★ space_018 工单③：日期视图抽屉（今日到期 / 逾期），同一挂载范式。
+  const [duePanelOpen, setDuePanelOpen] = useState(false)
   const createStatusDefinition = useTaskSpaceStore((state) => state.createStatusDefinition)
   const updateStatusDefinition = useTaskSpaceStore((state) => state.updateStatusDefinition)
   const reorderStatusDefinition = useTaskSpaceStore((state) => state.reorderStatusDefinition)
@@ -206,6 +212,13 @@ export default function TasksPage() {
   const categoryById = useMemo(
     () => deriveStatusCategoryById(definitions, workItems),
     [workItems, definitions],
+  )
+
+  // ★ space_018 工单③：今日/逾期分桶。今天按**本地**日历取键（禁止 UTC 截断，
+  //   见 due-date-selectors 的口径注释与单测）；类目过滤复用上面的 Space 定义查表。
+  const dueBuckets = useMemo(
+    () => bucketDueDates(workItems, localTodayKey(), (item) => categoryById[item.id]),
+    [workItems, categoryById],
   )
 
   // Derived blocking signal: recomputed locally so an edge that arrived before
@@ -627,7 +640,16 @@ export default function TasksPage() {
       {error ? <p role="alert" className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p> : null}
       {/* ★ 状态定义管理入口（双轴阶段 3）。放工具条而不是第四栏 ——
           现有布局 180/280/1fr，再加一栏会把任务树挤到不可用宽度。*/}
-      <div className="flex items-center justify-end border-b px-3 py-1.5">
+      <div className="flex items-center justify-end gap-2 border-b px-3 py-1.5">
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          data-testid="open-due-panel"
+          onClick={() => setDuePanelOpen((open) => !open)}
+        >
+          {duePanelOpen ? '关闭今日/逾期' : '今日/逾期'}
+        </Button>
         <Button
           type="button"
           size="xs"
@@ -655,6 +677,20 @@ export default function TasksPage() {
             onRename={(input) => runStatusAction(() => updateStatusDefinition(input))}
             onArchive={(input) => runStatusAction(() => archiveStatusDefinition(input))}
             onReorder={(input) => runStatusAction(() => reorderStatusDefinition(input))}
+          />
+        </section>
+      ) : null}
+      {duePanelOpen ? (
+        <section
+          data-testid="due-date-panel-drawer"
+          aria-label="今日到期与逾期"
+          className="max-h-[70vh] overflow-y-auto border-b bg-background px-4 py-4"
+        >
+          {/* 口径：逾期永远排在今日之上（催办优先于提醒）；逾期行红色高亮。 */}
+          <DueDatePanel
+            buckets={dueBuckets}
+            selectedWorkItemId={selectedWorkItemId}
+            onSelect={selectWorkItemAndDispatch}
           />
         </section>
       ) : null}

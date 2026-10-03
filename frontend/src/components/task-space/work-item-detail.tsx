@@ -31,7 +31,9 @@ export interface WorkItemDetailProps {
   /** Same-project nodes that may become the new parent (depth < 3). */
   availableParents?: CachedWorkItem[]
   // ★ 2026-09-11：priority 走受限值域类型 —— 组件只可能提交规范英文值或 null。
-  onUpdate?: (input: { title: string; description: string | null; priority: WorkItemPriority | null }) => Promise<unknown> | unknown
+  // ★ space_018：所有字段可选（PATCH 语义 = 只提交显式给出的字段；dueAt 传
+  //   本地日期键，null = 清除）—— 截止日期行因此能独立保存而不动其它字段。
+  onUpdate?: (input: { title?: string; description?: string | null; priority?: WorkItemPriority | null; dueAt?: string | null }) => Promise<unknown> | unknown
   onTransition?: (statusDefinitionId: string) => Promise<unknown> | unknown
   onMove?: (parentId: string | null) => Promise<unknown> | unknown
   /** Soft-delete / undo the work item (idempotent server side). */
@@ -334,6 +336,49 @@ export function WorkItemDetail({
             { key: value, value },
             PRIORITY_LABELS[value],
           )),
+        ),
+      ),
+      // ★ 2026-10-03（space_018）：截止日期。原生 date 输入的值本身就是
+      //   YYYY-MM-DD 本地日期键 —— 正是 due_at 的存储值格式（无时区歧义）。
+      //   与标题/描述的「草稿 + 保存按钮」不同：截止日是单字段原子操作，
+      //   选中/清除即保存（PATCH 只带 due_at 一个字段，省略的字段服务端不动）。
+      createElement(
+        'div',
+        { className: 'grid gap-1' },
+        createElement('label', { htmlFor: 'wi-due-at', className: 'text-xs font-medium text-muted-foreground' }, '截止日期'),
+        createElement(
+          'div',
+          { className: 'flex items-center gap-2' },
+          createElement('input', {
+            id: 'wi-due-at',
+            type: 'date',
+            'data-work-item-due-at': true,
+            className: 'h-9 rounded-md border bg-background px-3 text-sm outline-none',
+            value: workItem.dueAt ?? '',
+            disabled: pending || readonly,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+              const next = event.target.value
+              if (!onUpdate) return
+              void onUpdate({ dueAt: next === '' ? null : next })
+            },
+          }),
+          workItem.dueAt
+            ? createElement(
+                Button,
+                {
+                  type: 'button',
+                  variant: 'ghost',
+                  size: 'sm',
+                  disabled: pending || readonly,
+                  'aria-label': 'Clear due date',
+                  onClick: () => {
+                    if (!onUpdate) return
+                    void onUpdate({ dueAt: null })
+                  },
+                },
+                '清除',
+              )
+            : null,
         ),
       ),
       createElement(

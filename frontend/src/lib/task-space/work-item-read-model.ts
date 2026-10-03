@@ -57,6 +57,8 @@ export function projectWorkItemEntityRow(raw: unknown): WorkItemEntityRow {
     completionWindowEnd: (pick('completionWindowEnd', 'completion_window_end') ?? null) as string | null,
     reviewPoint: (pick('reviewPoint', 'review_point') ?? null) as string | null,
     hardDeadline: (pick('hardDeadline', 'hard_deadline') ?? null) as string | null,
+    // ★ 2026-10-03（space_018）：截止日期（旧本地行无此键 → null）。
+    dueAt: (pick('dueAt', 'due_at') ?? null) as string | null,
     effortEstimateLowerSeconds: (pick('effortEstimateLowerSeconds', 'effort_estimate_lower_seconds') ?? null) as number | null,
     effortEstimateUpperSeconds: (pick('effortEstimateUpperSeconds', 'effort_estimate_upper_seconds') ?? null) as number | null,
     effortActualSeconds: (pick('effortActualSeconds', 'effort_actual_seconds') ?? 0) as number,
