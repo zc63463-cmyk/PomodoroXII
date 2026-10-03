@@ -65,6 +65,14 @@ export interface WorkMapTreeProps {
   islands: readonly MapIslandLayout[]
   /** 当前会话 id（其岛根呈"当前会话"高亮） */
   sessionId?: string | null
+  /**
+   * **多个**当前会话 id（反思页「今日视图」用：一天可能有多个会话岛）。
+   *
+   * 与 `sessionId` 并存而非取代 —— 命中判据是 `两者并集`，
+   * 故既有调用方（只传 `sessionId`）行为**逐字节不变**。
+   * 属纯加法（ADR-0008 D18 红线 4「禁止复制同功能渲染代码」的正解是扩 prop，不是另写一份树）。
+   */
+  sessionIds?: readonly string[] | null
   className?: string
   style?: React.CSSProperties
 
@@ -1237,6 +1245,7 @@ function SubIslandFrameCard({
 export function WorkMapTree({
   islands,
   sessionId,
+  sessionIds,
   className,
   style,
   label,
@@ -1259,6 +1268,22 @@ export function WorkMapTree({
 }: WorkMapTreeProps): ReactNode {
   // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
   const filter = highlightType ?? null
+
+  /**
+   * 当前会话命中集合 = `sessionId` ∪ `sessionIds`。
+   *
+   * 并集而非取代：既有调用方只传 `sessionId` 时集合大小为 1，行为与从前逐字节相同；
+   * 反思页「今日视图」传多个 `sessionIds` 即可高亮当天全部会话岛。
+   * 空字符串一律剔除（协议层 `session_id` 缺省为 ''，不是合法 id）。
+   */
+  const currentSessionIds = useMemo(() => {
+    const set = new Set<string>()
+    if (typeof sessionId === 'string' && sessionId !== '') set.add(sessionId)
+    if (sessionIds != null) {
+      for (const id of sessionIds) if (id !== '') set.add(id)
+    }
+    return set
+  }, [sessionId, sessionIds])
 
   // 子岛聚焦解析（支持 stableId、cid、title 跨重新解析稳定对齐）：
   const activeSubIsland = useMemo(() => {
@@ -1345,7 +1370,7 @@ export function WorkMapTree({
             <ArchiveCard key={island.rootId} island={island} onExpand={onExpandArchive} dimmed={dimmed} />
           )
         }
-        const current = island.sessionId === sessionId
+        const current = island.sessionId !== null && currentSessionIds.has(island.sessionId)
         // 命中判据只看 thoughtType；无类型节点（会话根 / 存量标题行）在筛选下同样 dim
         const dimById = new Map<string, boolean>()
         for (const node of island.nodes) {
@@ -1452,9 +1477,8 @@ export function WorkMapTree({
                   node={node}
                   currentSession={
                     activeSubIsland === null &&
-                    typeof sessionId === 'string' &&
-                    sessionId !== '' &&
-                    node.sessionId === sessionId
+                    node.sessionId !== null &&
+                    currentSessionIds.has(node.sessionId)
                   }
                   currentPlan={isCurrentPlan}
                   completed={completedRootIds.has(node.id)}

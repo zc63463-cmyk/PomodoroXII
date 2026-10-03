@@ -41,6 +41,12 @@ export interface TimerMapOverviewProps {
   /** 本次会话 id（其岛根呈"本次"高亮）；准备态主图无"本次"语义，传 null */
   sessionId: string | null
   /**
+   * 多个当前会话 id（反思页「今日视图」用：一天可能多个会话岛）。
+   * 与 `sessionId` **并存**（命中判据取并集），既有调用方行为不变 —— 见
+   * `work-map-tree.tsx` 的 `sessionIds` 头注。
+   */
+  sessionIds?: readonly string[] | null
+  /**
    * 标题后缀（渲染为 `工作导图 · <title>`）：结束态默认「岛总览」，
    * 准备态弹层传「主图」（ADR-0008 D18）。**只改文案，不改内容**。
    */
@@ -50,6 +56,7 @@ export interface TimerMapOverviewProps {
 export function TimerMapOverview({
   mapText,
   sessionId,
+  sessionIds,
   title = '岛总览',
 }: TimerMapOverviewProps): ReactNode {
   // 近 N 展开（D19-a）：默认近 5；「全部展开」/ 点归档卡 → expandAll
@@ -156,6 +163,7 @@ export function TimerMapOverview({
             <WorkMapTree
               islands={islands}
               sessionId={sessionId}
+              sessionIds={sessionIds}
               highlightType={highlightType}
               onExpandArchive={() => setExpandAll(true)}
               focusedIslandId={focusedIslandId}
