@@ -22,6 +22,7 @@ from app.task_space.contracts import (
     MutateWorkItem,
     NoteCommandKind,
     RelationCommand,
+    StatusCommand,
     TaskSpaceAccepted,
     TaskSpaceCommand,
     TaskSpaceOutcome,
@@ -51,6 +52,14 @@ LABEL_REQUEST_NAMES = {
     "create": "CreateLabel",
     "update": "UpdateLabel",
     "archive": "ArchiveLabel",
+}
+# ★ 2026-10-02（状态双轴阶段 2）：status 定义的生命周期。
+#   比 label 多一个 reorder —— status 有 rank 且用户期望「按 category 分组、组内拖动」。
+STATUS_REQUEST_NAMES = {
+    "create": "CreateStatusDefinition",
+    "update": "UpdateStatusDefinition",
+    "archive": "ArchiveStatusDefinition",
+    "reorder": "ReorderStatusDefinition",
 }
 RELATION_REQUEST_NAMES = {
     "create": "CreateRelation",
@@ -108,6 +117,14 @@ def _business_payload(command: TaskSpaceCommand) -> Mapping[str, object]:
     if isinstance(command, LabelCommand):
         # create/update carry the definition fields; archive carries none.
         return dict(command.payload)
+    if isinstance(command, StatusCommand):
+        # 状态双轴：payload 里category 是**固定轴的取值**（用户不能发明新轴），
+        # 所以它参与业务哈希—— 改了 category 就是改了语义（换分组）。
+        # reorder 只带目标 rank，期望幂等：把 status 移到同一位置应命中旧回执。
+        payload = dict(command.payload)
+        if "rank" in payload:
+            payload["rank"] = int(payload["rank"])
+        return payload
     if isinstance(command, RelationCommand):
         # The endpoints ARE the business payload: the hash covers the logical
         # edge (from, to, type), never the derived relation_id (which is a
@@ -196,6 +213,19 @@ def build_task_space_request(
             None if operation == "create" else command.expected_version
         )
         payload = dict(command.payload)
+    elif isinstance(command, StatusCommand):
+        operation = command.operation
+        request_name = STATUS_REQUEST_NAMES[operation]
+        entity_id = (
+            command.command_id if operation == "create" else command.status_id
+        )
+        # reorder 是集合级操作：不锁expected_version（见 compiler 里的说明）
+        expected_version = (
+            None
+            if operation in {"create", "reorder"}
+            else command.expected_version
+        )
+        payload = dict(command.payload)
     else:  # closed TS0/TS2 union; fail loudly if its contract changes
         raise TypeError(f"unsupported TaskSpaceCommand: {type(command).__name__}")
 
@@ -223,6 +253,9 @@ def _accepted(command: TaskSpaceCommand, value: Mapping[str, object]) -> TaskSpa
         else "relation" if isinstance(command, RelationCommand)
         else "work_item" if isinstance(command, (CreateWorkItem, MutateWorkItem))
         else "label" if isinstance(command, LabelCommand)
+        # ★ 状态双轴：回执的 entity_type 用**单数snake**（与其它 typed 命令
+        #   一致），注意它与 sync 事件的 camel（statusDefinition）不同层。
+        else "status_definition" if isinstance(command, StatusCommand)
         else "work_item_note"
     )
     return TaskSpaceAccepted(

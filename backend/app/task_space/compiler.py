@@ -25,6 +25,7 @@ from app.task_space.contracts import (
     SYSTEM_TYPE_ID,
     WORK_ITEM_CONFIDENCE_VALUES,
     WORK_ITEM_PRIORITY_VALUES,
+    StatusCategory,
     format_work_item_display_key,
     relation_id,
     require_enum_value,
@@ -114,9 +115,14 @@ class TaskSpaceCompiler:
 # -- read-only sync entity rejection -----------------------------------------
 
 READ_ONLY_SYNC_TYPES = frozenset({
-    "project", "status_definition", "type_definition",
+    "project", "type_definition",
     "work_item_label",
 })
+# ★ 2026-10-02（状态双轴阶段 2）：`status_definition` 已移出。
+#   它原本是"Space 级锚点、极少变动"，但双轴下 status 变成**高频用户操作**
+#   （用户要建"等设计 review"这类贴合流程的状态），继续只读会违背离线优先定位。
+#   配套：`_compile_sync_entity` 必须新增 status_definition 分支，
+#   否则这里放开后会在下方抛 `unowned Task Space entity`。
 ENTITY_ACTIONS = frozenset({"entity.create", "entity.update", "entity.delete"})
 
 
@@ -139,6 +145,10 @@ async def _compile_sync_entity(self, context, request):
         return await self.compile_sync_work_item(context, request)
     if request.entity_type == "work_item_note":
         return await self.compile_sync_work_item_note(context, request)
+    # ★ 2026-10-02（状态双轴阶段 2）：status_definition 已移出 READ_ONLY_SYNC_TYPES，
+    #   必须在这里有对应分支，否则放开后会落到下面抛 unowned。
+    if request.entity_type == "status_definition":
+        return await self.compile_sync_status_definition(context, request)
     raise RuntimeError(f"unowned Task Space entity: {request.entity_type}")
 
 
@@ -1394,6 +1404,414 @@ async def _compile_ArchiveLabel(self, context, request):
 TaskSpaceCompiler.compile_CreateLabel = _compile_CreateLabel
 TaskSpaceCompiler.compile_UpdateLabel = _compile_UpdateLabel
 TaskSpaceCompiler.compile_ArchiveLabel = _compile_ArchiveLabel
+
+
+# -- Status definition lifecycle（状态双轴阶段 2） ---------------------------
+#
+# ★ 双轴的核心不变量：**category 是固定轴，用户自定义的是 status 行**。
+#   - 新建 status 时 category 必须命中现有 5 值闭集（DB CHECK +这里双保险）；
+#     用户**不能**发明新 category（那是阶段 1 的 017 迁移管的事）。
+#   - 同一 category 下可有多条 status（017 迁移把表级 UQ 换成部分唯一索引后成立）。
+#   - 每个 category 至多一条**活跃系统行**（部分唯一索引保证）——
+#     用户行（system=0）不受此限。
+#
+# ★ 为什么同步走 `_compile_sync_status_definition` 而不是复用 typed 命令：
+#   sync 是离线重放，客户端带全量 post-image，必须校验 category 值域
+#   （离线设备可能带本地自由文本，见 contracts.py 的枚举单一事实来源注释），
+#   且要遵守「一次重放恰好命中一个操作族」的约束。
+
+_STATUS_CATEGORY_VALUES: tuple[str, ...] = tuple(item.value for item in StatusCategory)
+
+
+def _require_status_category(value: object) -> str:
+    """fail-closed 校验 category 落在固定轴闭集内（离线设备可能带自由文本）。
+
+    ★ `require_enum_value` 抛的是 ValueError，必须转成 MutationRuleViolation
+      才能变成结构化拒绝而不是 500 —— 范式照 `_require_work_item_enum`。
+    """
+    from app.mutation.types import MutationRuleViolation
+    from app.task_space.contracts import require_enum_value
+
+    try:
+        require_enum_value("category", value, _STATUS_CATEGORY_VALUES)
+    except ValueError as exc:
+        raise MutationRuleViolation(
+            "payload_field_not_allowed",
+            {
+                "field": "category",
+                "reason": str(exc),
+                "allowed": list(_STATUS_CATEGORY_VALUES),
+            },
+            retryable=False,
+        ) from exc
+    return str(value)
+
+
+def _require_live_status(overlay, status_id: str) -> Mapping[str, object]:
+    """取status 行，且**拒绝已归档行**。
+
+    ★ 这是双轴放大出来的一个既有漏洞：`require_row` 不查 archived_at，
+      所以迁移到已归档的 status 一直可行。双轴后用户会真的创建并归档 status，
+      这个洞会变得可达 ⇒ 这里显式挡住。
+    """
+    row = _require_row(overlay, "status_definition", status_id)
+    if row.get("archived_at") is not None:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "status_definition_archived",
+            {"status_id": status_id},
+            retryable=False,
+        )
+    return row
+
+
+def _require_unique_status_name_in_category(overlay, name: str, category: str) -> None:
+    """同 category 内status 名不重复（跨 category 可同名——那是不同分组）。"""
+    from app.mutation.types import MutationRuleViolation
+
+    for row in overlay.rows("status_definition"):
+        if (
+            str(row["name"]) == name
+            and str(row["category"]) == category
+            and row["archived_at"] is None
+        ):
+            raise MutationRuleViolation(
+                "status_name_conflict",
+                {"name": name, "category": category},
+                retryable=False,
+            )
+
+
+def _authoritative_status_rank(overlay, category: str) -> int:
+    """category 内下一个可用 rank（append 语义，与 work_item 的 child_rank 同款）。"""
+    ranks = [
+        int(row["rank"])
+        for row in overlay.rows("status_definition")
+        if str(row["category"]) == category
+    ]
+    return max(ranks, default=-1) + 1
+
+
+async def _compile_CreateStatusDefinition(self, context, request):
+    overlay = context.authority
+    name = str(request.payload["name"]).strip()
+    if not name:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "status_name_conflict",
+            {"name": "", "reason": "name_required"},
+            retryable=False,
+        )
+    category = _require_status_category(request.payload.get("category"))
+    _require_unique_status_name_in_category(overlay, name, category)
+    status_id = _stable_id("status_definition", str(request.payload["command_id"]))
+    now = self.now_iso_ms()
+    rank = request.payload.get("rank")
+    after = {
+        "id": status_id,
+        "name": name,
+        "category": category,
+        "icon": request.payload.get("icon"),
+        "color": request.payload.get("color"),
+        "rank": (
+            int(rank) if rank is not None
+            else _authoritative_status_rank(overlay, category)
+        ),
+        # ★ 用户建的行一律 system=0；系统代表行由迁移播种，不可由客户端创建。
+        "system": False,
+        "archived_at": None,
+        "created_at": now,
+        "updated_at": now,
+        "version": 1,
+    }
+    plan = DbMutationPlan(
+        "status_definitions", {"id": status_id}, "insert", None, None, after
+    )
+    # ★ snake，不是 camel：SyncEventPlan.entity_type 由
+    #   `_validate_sync_event_against_catalog` 用 `catalog.get(event.entity_type)`
+    #   查（registry/catalog.py:188按 `_by_name` 索引，即**注册名**）。
+    #   registry 里那个 `sync_entity_type="statusDefinition"` 是 **wire 层**
+    #   （pull/推给客户端的 JSON 键），不是同步事件的 entity_type。
+    #   我最初写成 camel，实测报 KeyError → "persisted sync entity is
+    #   outside the compiled catalog"。label 因snake==camel 掩盖了这个坑。
+    event = SyncEventPlan("status_definition", status_id, "create", after, 1, now)
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=after,
+    )
+
+
+async def _compile_UpdateStatusDefinition(self, context, request):
+    overlay = context.authority
+    row = _require_live_status(overlay, str(request.entity_id))
+    _require_expected_version(row, request.expected_version)
+    patch = {
+        key: request.payload[key]
+        for key in ("name", "category", "icon", "color", "rank")
+        if key in request.payload
+    }
+    if not patch:
+        # 幂等：零效果回执，返回权威 post-image
+        return context.command(
+            request=request, db_plans=(), sync_events=(), value=dict(row),
+        )
+    if "category" in patch:
+        patch["category"] = _require_status_category(patch["category"])
+    if "name" in patch:
+        name = str(patch["name"]).strip()
+        if not name:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "status_name_conflict",
+                {"name": "", "reason": "name_required"},
+                retryable=False,
+            )
+        patch["name"] = name
+    if "rank" in patch:
+        patch["rank"] = int(patch["rank"])
+    # 同 category 内改名要查重（category 本身变了也要查）
+    target_category = str(patch.get("category", row["category"]))
+    target_name = str(patch.get("name", row["name"]))
+    _require_unique_status_name_in_category(overlay, target_name, target_category)
+    now = _monotonic_updated_at(str(row["updated_at"]), self.now_iso_ms())
+    after = {**row, **patch, "updated_at": now, "version": int(row["version"]) + 1}
+    plan = DbMutationPlan(
+        "status_definitions", {"id": row["id"]}, "update",
+        request.expected_version, row, after,
+    )
+    event = SyncEventPlan(
+        "status_definition", str(row["id"]), "update", after,
+        int(after["version"]), now,
+    )
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=after,
+    )
+
+
+async def _compile_ArchiveStatusDefinition(self, context, request):
+    """归档一个 status 定义。
+
+    ★ 引用守卫：仍有 work_items 指向它时**拒绝归档**。
+      否则那些工作项会悬空指向一个归档态状态，UI 上表现为"状态名消失"。
+    （系统行由迁移保护，这里只挡用户行；系统行引用数必然 > 0。）
+    """
+    overlay = context.authority
+    row = _require_live_status(overlay, str(request.entity_id))
+    _require_expected_version(row, request.expected_version)
+    status_id = str(row["id"])
+    refs = [
+        item
+        for item in overlay.rows("work_item")
+        if str(item["status_definition_id"]) == status_id
+        and item.get("archived_at") is None
+    ]
+    if refs:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "status_definition_in_use",
+            {"status_id": status_id, "work_item_count": len(refs)},
+            retryable=False,
+        )
+    now = _monotonic_updated_at(str(row["updated_at"]), self.now_iso_ms())
+    after = {**row, "archived_at": now, "updated_at": now, "version": int(row["version"]) + 1}
+    plan = DbMutationPlan(
+        "status_definitions", {"id": status_id}, "update",
+        request.expected_version, row, after,
+    )
+    event = SyncEventPlan(
+        "status_definition", status_id, "update", after, int(after["version"]), now,
+    )
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=after,
+    )
+
+
+async def _compile_ReorderStatusDefinition(self, context, request):
+    """把某个 status 移到同 category 内的指定位次。
+
+    ★ 为什么 reorder **不带** expected_version：
+      它是集合级操作——移动一个status 会连带改变同category 内其它行的 rank，
+      逐行 CAS 会让并发下的两个 reorder 互相打架（后写者因兄弟行version
+      变了而失败）。这里改为「读当前集合 → 计算目标顺序 → 写全部受影响行」，
+      靠 expected_version 只锁住**被移动的那一行**（若客户端提供了的话）。
+    """
+    overlay = context.authority
+    row = _require_live_status(overlay, str(request.entity_id))
+    if request.expected_version is not None:
+        _require_expected_version(row, request.expected_version)
+    category = str(row["category"])
+    target_rank = int(request.payload["rank"])
+    siblings = sorted(
+        (
+            item
+            for item in overlay.rows("status_definition")
+            if str(item["category"]) == category and item["archived_at"] is None
+        ),
+        key=lambda item: (int(item["rank"]), str(item["id"])),
+    )
+    moving = next(item for item in siblings if str(item["id"]) == str(row["id"]))
+    rest = [item for item in siblings if str(item["id"]) != str(row["id"])]
+    rest.insert(max(0, min(target_rank, len(rest))), moving)
+    now = _monotonic_updated_at(str(row["updated_at"]), self.now_iso_ms())
+    plans: list[DbMutationPlan] = []
+    events: list[SyncEventPlan] = []
+    for index, item in enumerate(rest):
+        if int(item["rank"]) == index:
+            continue  # 位置未变，不写
+        after = {
+            **item,
+            "rank": index,
+            "updated_at": now,
+            "version": int(item["version"]) + 1,
+        }
+        plans.append(
+            DbMutationPlan(
+                "status_definitions", {"id": item["id"]}, "update",
+                int(item["version"]), item, after,
+            )
+        )
+        events.append(
+            SyncEventPlan(
+                "status_definition", str(item["id"]), "update", after,
+                int(after["version"]), now,
+            )
+        )
+    if not plans:
+        # 已经就位：幂等零效果
+        return context.command(
+            request=request, db_plans=(), sync_events=(), value=dict(row),
+        )
+    return context.command(
+        request=request, db_plans=tuple(plans), sync_events=tuple(events),
+        value={**row, "rank": target_rank},
+    )
+
+
+async def _compile_sync_status_definition(self, context, request):
+    """离线重放 status_definition（create / update / delete）。
+
+    ★ fail-closed 点：
+      1. category 必须命中 5 值闭集 —— 离线设备可能带本地自由文本
+         （与 priority / confidence 同一类问题，见 _full_work_item_sync_candidate 注释）。
+      2. create 时system 必须为 false —— 客户端**不得**伪造系统代表行
+         （那会破坏"每 category 至多一条活跃系统行"的不变量）。
+      3. delete 走归档而非物理删除（保留引用完整性）。
+    """
+    from app.mutation.types import MutationRuleViolation
+
+    overlay = context.authority
+    action = request.name.removeprefix("entity.")
+    now = self.now_iso_ms()
+
+    if action == "create":
+        payload = request.payload
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            raise MutationRuleViolation(
+                "status_name_conflict",
+                {"name": "", "reason": "name_required"},
+                retryable=False,
+            )
+        category = _require_status_category(payload.get("category"))
+        if bool(payload.get("system")):
+            raise MutationRuleViolation(
+                "server_managed_field_changed",
+                {"fields": ["system"], "reason": "system_rows_are_server_seeded"},
+                retryable=False,
+            )
+        _require_unique_status_name_in_category(overlay, name, category)
+        after = {
+            "id": str(payload["id"]),
+            "name": name,
+            "category": category,
+            "icon": payload.get("icon"),
+            "color": payload.get("color"),
+            "rank": int(payload.get("rank", 0)),
+            "system": False,
+            "archived_at": None,
+            "created_at": str(payload.get("created_at") or now),
+            "updated_at": now,
+            "version": 1,
+        }
+        plan = DbMutationPlan(
+            "status_definitions", {"id": after["id"]}, "insert", None, None, after
+        )
+        event = SyncEventPlan(
+            "status_definition", after["id"], "create", after, 1, now
+        )
+        return context.command(
+            request=request, db_plans=(plan,), sync_events=(event,), value=after,
+        )
+
+    row = _require_row(overlay, "status_definition", str(request.entity_id))
+    if action == "delete":
+        # 物理删除会悬空所有引用 work_items ⇒ 一律归档
+        after = {
+            **row,
+            "archived_at": now,
+            "updated_at": now,
+            "version": int(row["version"]) + 1,
+        }
+        plan = DbMutationPlan(
+            "status_definitions", {"id": row["id"]}, "update",
+            int(row["version"]), row, after,
+        )
+        event = SyncEventPlan(
+            "status_definition", str(row["id"]), "update", after,
+            int(after["version"]), now,
+        )
+        return context.command(
+            request=request, db_plans=(plan,), sync_events=(event,), value=after,
+        )
+
+    # update
+    if bool(request.payload.get("system")) or bool(row["system"]) != bool(
+        request.payload.get("system", row["system"])
+    ):
+        raise MutationRuleViolation(
+            "server_managed_field_changed",
+            {"fields": ["system"]},
+            retryable=False,
+        )
+    category = _require_status_category(request.payload.get("category", row["category"]))
+    name = str(request.payload.get("name", row["name"])).strip()
+    if not name:
+        raise MutationRuleViolation(
+            "status_name_conflict",
+            {"name": "", "reason": "name_required"},
+            retryable=False,
+        )
+    after = {
+        **row,
+        "name": name,
+        "category": category,
+        "icon": request.payload.get("icon", row["icon"]),
+        "color": request.payload.get("color", row["color"]),
+        "rank": int(request.payload.get("rank", row["rank"])),
+        "updated_at": now,
+        "version": int(row["version"]) + 1,
+    }
+    plan = DbMutationPlan(
+        "status_definitions", {"id": row["id"]}, "update",
+        int(row["version"]), row, after,
+    )
+    event = SyncEventPlan(
+        "status_definition", str(row["id"]), "update", after,
+        int(after["version"]), now,
+    )
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=after,
+    )
+
+
+TaskSpaceCompiler.compile_CreateStatusDefinition = _compile_CreateStatusDefinition
+TaskSpaceCompiler.compile_UpdateStatusDefinition = _compile_UpdateStatusDefinition
+TaskSpaceCompiler.compile_ArchiveStatusDefinition = _compile_ArchiveStatusDefinition
+TaskSpaceCompiler.compile_ReorderStatusDefinition = _compile_ReorderStatusDefinition
+TaskSpaceCompiler.compile_sync_status_definition = _compile_sync_status_definition
 
 
 # -- WorkItem label-set mutations (D5 Y) -------------------------------------

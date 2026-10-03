@@ -27,6 +27,7 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.folders import router as folders_router
     from app.routes.v1.habits import router as habits_router
     from app.routes.v1.labels import router as labels_router
+    from app.routes.v1.status_definitions import router as status_definitions_router
     from app.routes.v1.meta import router as meta_router
     from app.routes.v1.notes import router as notes_router
     from app.routes.v1.projects import router as projects_router
@@ -79,6 +80,13 @@ def build_v1_router() -> APIRouter:
     # Task Space contract routers (space token required).
     router.include_router(projects_router, prefix="/projects", tags=["projects"])
     router.include_router(labels_router, prefix="/labels", tags=["labels"])
+    # ★ 2026-10-02（状态双轴阶段 2）：status 定义 CRUD。
+    #   用 status-definitions 作路径以免与既有 /statuses 类路由混淆。
+    router.include_router(
+        status_definitions_router,
+        prefix="/status-definitions",
+        tags=["task-space"],
+    )
     router.include_router(work_items_router, prefix="/work-items", tags=["work-items"])
     router.include_router(relations_router, prefix="/relations", tags=["relations"])
     router.include_router(

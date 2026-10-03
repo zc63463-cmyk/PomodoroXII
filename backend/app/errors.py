@@ -72,6 +72,14 @@ RESERVED_TS_CODES = frozenset(
         "active_session_recovery_required",
         "work_item_structure_changed",
         "label_name_conflict",
+        # ★ 2026-10-02（状态双轴阶段 2）：status 定义的三个拒绝码。
+        #   同 category 内名冲突（跨 category 可同名 —— 那是不同分组）。
+        "status_name_conflict",
+        #   归档时被work_items 引用 ⇒ 拒绝（否则那些项的状态名会从 UI 消失）。
+        "status_definition_in_use",
+        #   操作目标是已归档的 status 行（双轴放大的既有漏洞：_require_row
+        #   过去不查 archived_at，label 时代不可达，双轴后可达）。
+        "status_definition_archived",
         # ★ 2026-09-20（TS-02a / 裁决一）：labelIds 是「本次操作完成后的完整目标
         #   集合」，操作方向必须由**权威集合**判定，绝不按载荷内容猜「差量还是完整
         #   集合」。add 只允许维持/增加（current ⊆ declared），remove 只允许维持/
@@ -144,6 +152,14 @@ MUTATION_REJECTION_SPECS = MappingProxyType(
         ),
         "work_item_structure_changed": _spec(409, "Work item structure changed", "conflict"),
         "label_name_conflict": _spec(409, "Label name conflict", "conflict"),
+        # ★ 2026-10-02（状态双轴阶段 2）：见闭集处的同批注释。
+        "status_name_conflict": _spec(409, "Status name conflict", "conflict"),
+        "status_definition_in_use": _spec(
+            409, "Status definition is still referenced by work items", "conflict"
+        ),
+        "status_definition_archived": _spec(
+            409, "Status definition is archived", "conflict"
+        ),
         # ★ 2026-09-20（TS-02a / 裁决一）：目标集合越过操作方向 = 载荷契约错误，
         #   与「未知操作 / 非法 relation_type」同层的 422 validation_error，而不是
         #   409 冲突 —— 它不是并发/状态冲突，重试同一个载荷永远不会成功。

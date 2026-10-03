@@ -75,6 +75,20 @@ class LabelOperation(StrEnum):
     ARCHIVE = "archive"
 
 
+class StatusOperation(StrEnum):
+    """Status definition lifecycle (状态双轴阶段 2)。
+
+    ★ 与 LabelOperation 的差别：多一个 ``REORDER``。
+    标签只能追加（无 rank 语义，按 name 排序），而 status 有 rank 且用户
+    期望「按 category 分组、组内可拖动」—— 那是双轴的原生交互。
+    """
+
+    CREATE = "create"
+    UPDATE = "update"
+    ARCHIVE = "archive"
+    REORDER = "reorder"
+
+
 class RelationOperation(StrEnum):
     CREATE = "create"
     REMOVE = "remove"
@@ -235,6 +249,41 @@ class LabelCommand:
 
 
 @dataclass(frozen=True)
+class StatusCommand:
+    """Status definition lifecycle (状态双轴阶段 2): create/update/archive/reorder.
+
+    ★ 双轴的核心：``category`` 是**固定轴**（5 值 CHECK，不可增删），
+    用户自定义的是 ``status`` 行本身 —— 同一 category 下可有多条。
+    因此本命令**不接受** category 的任意新值，只允许「命中现有 5 值闭集」。
+
+    ``status_id`` required for update/archive/reorder (oracle identity);
+    create 留 None —— 服务端从 command_id 派生 id。
+    reorder 需要 ``rank``（目标位次），但不需要 expected_version
+    （重排是集合级操作，逐行 CAS 反而会互相打架）。
+    """
+
+    operation: str
+    command_id: str
+    space_id: str
+    status_id: str | None
+    expected_version: int | None
+    payload_hash: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if self.operation not in {item.value for item in StatusOperation}:
+            raise ValueError(f"unsupported status operation: {self.operation}")
+        if self.operation == "create":
+            return
+        if self.status_id is None:
+            raise ValueError("status update/archive/reorder requires status_id")
+        if self.operation != "reorder" and self.expected_version is None:
+            raise ValueError(
+                "status update/archive requires expected_version (reorder does not)"
+            )
+
+
+@dataclass(frozen=True)
 class RelationCommand:
     """Create, remove, or resolve-confirm one dependency edge.
 
@@ -274,6 +323,7 @@ TaskSpaceCommand: TypeAlias = (
     | MutateWorkItem
     | WorkItemNoteCommand
     | LabelCommand
+    | StatusCommand
     | RelationCommand
 )
 

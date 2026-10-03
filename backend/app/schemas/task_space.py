@@ -126,6 +126,26 @@ class LabelResponse(WireResponseModel):
     updated_at: str
 
 
+class StatusDefinitionResponse(WireResponseModel):
+    """Status definition view（状态双轴：category 是固定轴取值）。
+
+    ★ 与 LabelResponse 的差别：多category / icon / rank / system。
+      ``system=true`` 的是每个 category 的系统代表行（迁移播种，不可删）。
+    """
+
+    id: str
+    name: str
+    category: str
+    icon: str | None
+    color: str | None
+    rank: int = Field(ge=0)
+    system: bool
+    archived_at: str | None
+    version: int = Field(ge=1)
+    created_at: str
+    updated_at: str
+
+
 class WorkItemLabelsRequest(WireModel):
     """D5 Y: declare the FULL target label_ids set expected after this
     mutation (labels-as-state).  The server read-modify-writes the junction
@@ -341,6 +361,54 @@ class UpdateLabelRequest(WireModel):
 
 
 class ArchiveLabelRequest(WireModel):
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+# --- Status definition（状态双轴阶段 2） ------------------------------------
+#
+# ★ category 只做**长度校验**、不做值域校验 —— 与本文件既有惯例一致
+#   （schemas 只限长度，值域由 contracts 的 Literal + 编译器 + DB CHECK 三层
+#   fail-closed 兜住；见 contracts.py 顶部"枚举单一事实来源"的注释）。
+#   放行未知值不会 500，只会被编译器或 CHECK 挡下并给出可读拒绝。
+
+class CreateStatusDefinitionRequest(WireModel):
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    name: str = Field(min_length=1, max_length=200)
+    category: str = Field(min_length=1, max_length=32)
+    icon: str | None = Field(default=None, max_length=32)
+    color: str | None = Field(default=None, max_length=32)
+
+
+class UpdateStatusDefinitionRequest(WireModel):
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    category: str | None = Field(default=None, min_length=1, max_length=32)
+    icon: str | None = Field(default=None, max_length=32)
+    color: str | None = Field(default=None, max_length=32)
+
+
+class ReorderStatusDefinitionRequest(WireModel):
+    """Move within its own category.
+
+    ★ 刻意**没有** expected_version：集合级操作，逐行 CAS 会让并发 reorder
+      互相打架（见 compiler 的 _compile_ReorderStatusDefinition 注释）。
+    """
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    rank: int = Field(ge=0)
+
+
+class ArchiveStatusDefinitionRequest(WireModel):
     command_id: CommandId
     space_id: str = Field(min_length=1, max_length=64)
     expected_version: int = Field(ge=0)

@@ -290,6 +290,19 @@ EXPECTED_TS1_COMPILER_REJECTION_CODES = frozenset({
     #   MUTATION_REJECTION_SPECS，422 validation_error），因此这里必须列入清单，
     #   而不是被排除。
     "label_set_direction_violated",
+    # ★ 2026-10-02（状态双轴阶段 2）：status 定义生命周期产出的三个码，
+    #   与 label 同层（唯一名冲突 / 归档引用守卫 / 归档行不可操作）。
+    "status_name_conflict",
+    "status_definition_in_use",
+    "status_definition_archived",
+    # ★ compiler.py 早已为「sync 重放试图改服务端自持列」产出该码
+    #   （work_item 的 display_key / effort_actual_seconds / created_at，
+    #   见 compiler.py 的 WORK_ITEM_IMMUTABLE_FIELDS 分支），
+    #   errors.py 也早已注册（:52 / :185）——此前只是没被这条清单收录，
+    #   阶段 2 的 sync_status_definition 分支把它带进扫描范围后暴露。
+    #   **守卫测试的意图正是"编译器产出的码必须逐个显式登记"**，
+    #   所以这里补登记而不是改断言。
+    "server_managed_field_changed",
 })
 
 
