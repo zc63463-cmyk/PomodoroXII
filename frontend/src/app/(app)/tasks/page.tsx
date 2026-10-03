@@ -13,6 +13,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ProjectRail } from '@/components/task-space/project-rail'
+// ★ 2026-10-03（状态双轴阶段 3收尾）：状态定义管理面板的入口。
+//   组件本身在 stage 3 已完成并有18 个测试，此前只缺页面挂载。
+import { StatusDefinitionPanel } from '@/components/task-space/status-definition-panel'
 import { LaunchSessionButton } from '@/components/task-space/launch-session-button'
 import { WorkItemDetail } from '@/components/task-space/work-item-detail'
 import { ActiveChildConflictDialog } from '@/components/task-space/active-child-conflict-dialog'
@@ -113,6 +116,33 @@ export default function TasksPage() {
   const [resolvingConflict, setResolvingConflict] = useState(false)
   const [blockedLaunch, setBlockedLaunch] = useState<CachedWorkItem | null>(null)
   const [treeFilter, setTreeFilter] = useState<WorkItemTreeFilter>(EMPTY_TREE_FILTER)
+
+  // ★ 2026-10-03（状态双轴阶段 3 收尾）：状态定义面板的开关 + 错误位。
+  //   做成**抽屉**而不是第四栏：现有布局是 180/280/1fr 三栏，再加一栏会把
+  //   树挤到不可用宽度。抽屉按需覆盖，关闭后布局原样。
+  const [statusPanelOpen, setStatusPanelOpen] = useState(false)
+  const [statusPanelError, setStatusPanelError] = useState<string | null>(null)
+  const createStatusDefinition = useTaskSpaceStore((state) => state.createStatusDefinition)
+  const updateStatusDefinition = useTaskSpaceStore((state) => state.updateStatusDefinition)
+  const reorderStatusDefinition = useTaskSpaceStore((state) => state.reorderStatusDefinition)
+  const archiveStatusDefinition = useTaskSpaceStore((state) => state.archiveStatusDefinition)
+
+  // 面板的错误要**说人话**：store 里存的是 error message，这里直接透出。
+  // ★ 不静默吞掉 409 status_definition_in_use —— 那是「这个状态还被工作项引用着」，
+  //   用户需要知道为什么归档失败。
+  const runStatusAction = useCallback(
+    async (action: () => Promise<unknown>) => {
+      try {
+        setStatusPanelError(null)
+        await action()
+      } catch (error) {
+        setStatusPanelError(
+          error instanceof Error ? error.message : '状态操作失败，请稍后重试',
+        )
+      }
+    },
+    [],
+  )
 
   // Status ids are Space-scoped definitions, never hardcoded: the backend
   // owns the status machine and a Space may rename or re-categorise entries.
@@ -595,6 +625,39 @@ export default function TasksPage() {
   return (
     <div className="flex min-h-full min-w-0 flex-col">
       {error ? <p role="alert" className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p> : null}
+      {/* ★ 状态定义管理入口（双轴阶段 3）。放工具条而不是第四栏 ——
+          现有布局 180/280/1fr，再加一栏会把任务树挤到不可用宽度。*/}
+      <div className="flex items-center justify-end border-b px-3 py-1.5">
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          data-testid="open-status-panel"
+          onClick={() => setStatusPanelOpen((open) => !open)}
+        >
+          {statusPanelOpen ? '关闭状态管理' : '状态管理'}
+        </Button>
+      </div>
+      {statusPanelOpen ? (
+        <section
+          data-testid="status-panel-drawer"
+          aria-label="状态定义管理"
+          className="max-h-[70vh] overflow-y-auto border-b bg-background px-4 py-4"
+        >
+          <p className="mb-3 text-xs text-muted-foreground">
+            左侧 5 类是<b>固定轴</b>，不可增删；你可以在每一类下面自建状态。
+            标「系统」的那条是该类的语义锚点（新建工作项、会话完成都按它找），不能改名或归档。
+          </p>
+          <StatusDefinitionPanel
+            rows={definitions?.statuses ?? []}
+            errorMessage={statusPanelError}
+            onCreate={(input) => runStatusAction(() => createStatusDefinition(input))}
+            onRename={(input) => runStatusAction(() => updateStatusDefinition(input))}
+            onArchive={(input) => runStatusAction(() => archiveStatusDefinition(input))}
+            onReorder={(input) => runStatusAction(() => reorderStatusDefinition(input))}
+          />
+        </section>
+      ) : null}
       <div className="grid min-h-[calc(100vh-7rem)] min-w-0 flex-1 grid-cols-1 md:grid-cols-[180px_280px_minmax(0,1fr)]">
         <ProjectRail
           projects={projects}

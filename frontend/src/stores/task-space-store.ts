@@ -247,6 +247,29 @@ export interface TaskSpaceActions {
   }) => Promise<CachedRelation>
   // D5 Y: converge the work item label set (add=true union, false removal).
   toggleWorkItemLabel: (workItemId: string, labelId: string, add: boolean) => Promise<CachedWorkItem>
+
+  // ---- 状态定义生命周期（状态双轴阶段 3） -------------------------------
+  // ★ 与上面的 repository 接口**同名但不同层**：那边是「repository 提供什么能力」，
+  //   这边是「页面可以调什么 action」。两个都要写，否则页面拿不到方法。
+  createStatusDefinition: (input: {
+    name: string
+    category: StatusCategoryValue
+    color?: string | null
+  }) => Promise<CachedStatusDefinition>
+  updateStatusDefinition: (input: {
+    statusId: string
+    name?: string
+    category?: StatusCategoryValue
+    color?: string | null
+  }) => Promise<CachedStatusDefinition>
+  /** ★ 没有 expectedVersion：集合级重排（后端刻意不锁行版本）。 */
+  reorderStatusDefinition: (input: { statusId: string; rank: number }) => Promise<void>
+  /** 后端有引用守卫：仍被 work_items 引用时 409 status_definition_in_use。 */
+  archiveStatusDefinition: (input: {
+    statusId: string
+    expectedVersion: number
+  }) => Promise<CachedStatusDefinition>
+
   reset: () => void
 }
 
