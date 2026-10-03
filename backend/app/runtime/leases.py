@@ -14,6 +14,7 @@ import portalocker
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
+from app.errors import AppError
 from app.runtime.durability import next_fence
 from app.runtime.joined_thread import run_joined_awaitable, run_joined_thread
 
@@ -64,19 +65,41 @@ class LeaseMode(StrEnum):
     EXCLUSIVE = "exclusive"
 
 
-class LeaseTimeoutError(RuntimeError):
+# ── 租约失败（2026-10-03 修：此前只继承 RuntimeError → 逃出 AppError 处理器）──
+# 症状：Space 门闩排队超时抛出的 LeaseTimeoutError 一路冒到 ASGI 兜底，
+# 客户端收到 **500 server_error**（不可重试），而它 `retryable = True`
+# 本该被当作**瞬时争用**（503 + Retry-After）让客户端退避重试。
+#
+# 为什么多重继承：`tests/test_migration_runner.py:292` 与
+# `tests/test_runtime_leases.py:863` 断言 `isinstance(..., RuntimeError)`，
+# 直接换基类会打破它们。RuntimeError 保留在继承链里，两边语义都不丢。
+#
+# 状态码口径：
+#   超时   → 503（Service Unavailable）：瞬时争用，可退避重试
+#   顺序错 → 409（Conflict）：调用顺序非法，重试无用
+#   陈旧栅栏 → 409：fence 已过期，重试无用（调用方需重新取 fence）
+class LeaseTimeoutError(AppError, RuntimeError):
     code = "lease_timeout"
     retryable = True
+    detail = "Space lease acquisition timed out"
+    status_code = 503
+    legacy_error_type = "lease_timeout"
 
 
-class LeaseOrderError(RuntimeError):
+class LeaseOrderError(AppError, RuntimeError):
     code = "lease_order_invalid"
     retryable = False
+    detail = "Lease acquisition order is invalid"
+    status_code = 409
+    legacy_error_type = "lease_order_invalid"
 
 
-class StaleFenceError(RuntimeError):
+class StaleFenceError(AppError, RuntimeError):
     code = "stale_fence"
     retryable = False
+    detail = "Durability fence is stale"
+    status_code = 409
+    legacy_error_type = "stale_fence"
 
 
 Release = Callable[[], Awaitable[None]]
