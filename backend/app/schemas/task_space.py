@@ -184,6 +184,9 @@ class WorkItemResponse(WireResponseModel):
     completion_window_end: str | None
     review_point: str | None
     hard_deadline: str | None
+    # ★ 2026-10-03（space_018）：截止日期（读投影直出）。默认 None：容忍手工
+    # 构造的查询行（迁移前的缓存行也必须能返回 null，不阻断响应）。
+    due_at: str | None = None
     effort_estimate_lower_seconds: int | None = Field(ge=0)
     effort_estimate_upper_seconds: int | None = Field(ge=0)
     effort_actual_seconds: int = Field(ge=0)
@@ -238,6 +241,10 @@ class UpdateWorkItemRequest(WireModel):
     # ★ 2026-09-11：PATCH 的 priority 也必须是封闭值域（显式 null 仍可清空）。
     priority: WorkItemPriorityValue | None = None
     type_definition_id: str | None = Field(default=None, max_length=64)
+    # ★ 2026-10-03（space_018）：截止日期。只校验长度、不校验值域 —— 与本文件
+    # 既有标量字段惯例一致（值域/格式由 DB 列宽与前端契约约束，服务端不做
+    # 语义解析）。显式 null = 清除截止；省略 = 不动（路由按 model_fields_set 过滤）。
+    due_at: str | None = Field(default=None, max_length=64)
 
 
 class MoveWorkItemRequest(WireModel):

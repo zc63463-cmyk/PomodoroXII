@@ -55,6 +55,11 @@ class WorkItem(Base, SyncMixin):
     completion_window_end: Mapped[str | None] = mapped_column(String(32))
     review_point: Mapped[str | None] = mapped_column(String(32))
     hard_deadline: Mapped[str | None] = mapped_column(String(32))
+    # ★ 2026-10-03（space_018）：截止日期。竞品调研 7/7 主流产品都有 due date，
+    #   这是柔性计划字段族里唯一证据充分的基础字段；与 DORMANT 的 8 个柔性字段
+    #   无关（那些仍不激活）。可空：NULL = 无截止。值域不做 DB CHECK（同族惯例，
+    #   校验在 schema / 编译器层）。本阶段只出不进：不进 WORK_ITEM_SYNC_FIELDS。
+    due_at: Mapped[str | None] = mapped_column(String(32))
     effort_estimate_lower_seconds: Mapped[int | None] = mapped_column(Integer)
     effort_estimate_upper_seconds: Mapped[int | None] = mapped_column(Integer)
     effort_actual_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

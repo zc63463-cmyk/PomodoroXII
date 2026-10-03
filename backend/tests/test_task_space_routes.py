@@ -562,7 +562,10 @@ class TestTaskSpaceIntegration:
             "id", "spaceId", "projectId", "displayKey", "title", "description",
             "typeDefinitionId", "statusDefinitionId", "priority", "parentId",
             "childRank", "depth", "completionWindowStart", "completionWindowEnd",
-            "reviewPoint", "hardDeadline", "effortEstimateLowerSeconds",
+            "reviewPoint", "hardDeadline",
+            # ★ space_018：截止日期随读投影直出（可空，创建即 None）。
+            "dueAt",
+            "effortEstimateLowerSeconds",
             "effortEstimateUpperSeconds", "effortActualSeconds", "confidence",
             "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
             # D5 Y: read-only labelIds projection on work item reads.

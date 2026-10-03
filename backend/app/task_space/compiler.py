@@ -241,6 +241,10 @@ WORK_ITEM_SCALAR_FIELDS = frozenset({
     "hard_deadline", "effort_estimate_lower_seconds",
     "effort_estimate_upper_seconds", "confidence", "archived_at",
     "marked_as_attention",
+    # ★ 2026-10-03（space_018）：截止日期。在 SCALAR 白名单 ⇒ 在线 PATCH 可写
+    #   （routes 层显式字段表 + sync 重放的 scalar 家族变更归属都经这里）。
+    #   注意这仍不是 WORK_ITEM_SYNC_FIELDS —— 入站全量 post-image 本阶段不带它。
+    "due_at",
 })
 WORK_ITEM_MOVE_FIELDS = frozenset({"project_id", "parent_id", "child_rank"})
 WORK_ITEM_STATUS_FIELDS = frozenset({
@@ -503,6 +507,10 @@ async def _compile_CreateWorkItem(self, context, request):
         "completion_window_end": None,
         "review_point": None,
         "hard_deadline": None,
+        # ★ 2026-10-03（space_018）：行键集必须完整（unit_of_work 的
+        #   require_complete_row 要求 set(row) == set(spec.field_names)）；
+        #   创建即无截止，显式 None。
+        "due_at": None,
         "effort_estimate_lower_seconds": None,
         "effort_estimate_upper_seconds": None,
         "effort_actual_seconds": 0,
@@ -1255,10 +1263,21 @@ async def _compile_sync_work_item(self, context, request):
     # cancelled_at / child_rank.  label_ids is a virtual projection field: it
     # travels in the sync event post-image but never in a work_items row.
     after = {key: value for key, value in candidate.items() if key != "label_ids"}
+    # ★ 2026-10-03（space_018）：due_at 已是 DB 列 + FieldSpec（行形状校验要求
+    #   set(row) == set(spec.field_names)），但本阶段不在 WORK_ITEM_SYNC_FIELDS
+    #   —— 上行 post-image 不携带（携带即拒 full_post_image_required），落库行
+    #   与 sync 事件 payload 必须从真实前像继承（服务端自持，照 pre_waiting 的
+    #   「只出站」处理范式）。进白名单后 candidate 会携带它，setdefault 让
+    #   两种形态共用一处代码、后到的显式值不被继承值覆盖。
+    after.setdefault("due_at", before["due_at"])
     # ★ 2026-09-12（ADR-0003）：落库行与 sync 事件 payload 都必须携带服务端自持的
     #   pre_waiting 列（行形状校验要求 set(row) == spec.field_names）。
     after[PRE_WAITING_STATUS_FIELD] = pre_waiting_status
-    event_payload = {**dict(candidate), PRE_WAITING_STATUS_FIELD: pre_waiting_status}
+    event_payload = {
+        **dict(candidate),
+        "due_at": after["due_at"],
+        PRE_WAITING_STATUS_FIELD: pre_waiting_status,
+    }
     plan = DbMutationPlan(
         "work_items", {"id": after["id"]}, "update",
         request.expected_version, before, after,

@@ -136,6 +136,9 @@ def _work_item_response(value, space_id: str, depth: int) -> WorkItemResponse:
         completion_window_end=value["completion_window_end"],
         review_point=value["review_point"],
         hard_deadline=value["hard_deadline"],
+        # ★ 2026-10-03（space_018）：截止日期走读投影（原始值直出）。
+        #   .get 容忍手工构造的查询行（迁移前的缓存行返回 null，不阻断响应）。
+        due_at=value.get("due_at"),
         effort_estimate_lower_seconds=value["effort_estimate_lower_seconds"],
         effort_estimate_upper_seconds=value["effort_estimate_upper_seconds"],
         effort_actual_seconds=int(value["effort_actual_seconds"]),
@@ -648,7 +651,7 @@ async def update_work_item(
     # explicit ``description: null`` clears the field while an omitted field
     # is left untouched -- matching the frontend canonical hash input.
     patch: dict[str, Any] = {}
-    for field_name in ("title", "description", "priority", "type_definition_id"):
+    for field_name in ("title", "description", "priority", "type_definition_id", "due_at"):
         if field_name in body.model_fields_set:
             patch[field_name] = getattr(body, field_name)
     command = MutateWorkItem(

@@ -41,12 +41,18 @@ def _wire_value(value):
 #   入站 push 仍按 WORK_ITEM_SYNC_FIELDS 精确相等 —— 客户端构造 post-image 时
 #   必须剔除它；而服务端落库行 / sync 事件 / 返回值必须携带它（完整行形状）。
 PRE_WAITING_FIELD = "pre_waiting_status_definition_id"
+# ★ 2026-10-03（space_018）：due_at 出站按模型驱动全列带出（行形状闸门要求）；
+#   本文件的老客户端 candidate（_sync_candidate）不携带它，服务端从真实前像
+#   继承补齐 ⇒ 服务端返回值 / 事件 = candidate + {PRE_WAITING_FIELD, DUE_AT_FIELD}。
+#   工单②把 due_at 放行入站后：新客户端可自带，本文件的剔除形态仍合法（继承）。
+DUE_AT_FIELD = "due_at"
 
 
 def _sync_candidate(item: Mapping[str, object], /, **changes: object) -> dict:
     """Client outbound workItem post-image (inbound contract stays exact)."""
     candidate = {**item, **changes}
     candidate.pop(PRE_WAITING_FIELD, None)
+    candidate.pop(DUE_AT_FIELD, None)
     return candidate
 
 
@@ -386,7 +392,7 @@ async def test_sync_scalar_replay_preserves_every_sync_field_verbatim(
     #   candidate 不含它 —— 「verbatim」断言限定在 WORK_ITEM_SYNC_FIELDS 范围内；
     #   服务端返回值 / 事件额外携带该列（完整 post-image 不变量）。
     assert _sync_fields_subset(data["result"].value) == expected
-    assert set(data["result"].value) == set(candidate) | {PRE_WAITING_FIELD}
+    assert set(data["result"].value) == set(candidate) | {PRE_WAITING_FIELD, DUE_AT_FIELD}
     row = await task_space_fixture.read_work_item(str(data["item"]["id"]))
     assert _sync_fields_subset(row) == expected
     assert row["updated_at"] == client_updated_at  # NOT overwritten by server
@@ -395,7 +401,7 @@ async def test_sync_scalar_replay_preserves_every_sync_field_verbatim(
     events = await task_space_fixture.visible_events(operation_id="scalar-fidelity-op")
     assert len(events) == 1
     assert _sync_fields_subset(_wire_value(events[0].payload)) == expected
-    assert set(events[0].payload) == set(candidate) | {PRE_WAITING_FIELD}
+    assert set(events[0].payload) == set(candidate) | {PRE_WAITING_FIELD, DUE_AT_FIELD}
 
 
 @pytest.mark.asyncio
@@ -447,7 +453,7 @@ async def test_sync_move_replay_preserves_source_rank_and_timestamp_verbatim(
     # ★ 2026-09-12（ADR-0003）：verbatim 语义限定在 WORK_ITEM_SYNC_FIELDS 范围内
     #   （pre_waiting 列由服务端自持，入站 candidate 不含它）。
     assert _sync_fields_subset(result.value) == _sync_fields_subset(candidate)
-    assert set(result.value) == set(candidate) | {PRE_WAITING_FIELD}
+    assert set(result.value) == set(candidate) | {PRE_WAITING_FIELD, DUE_AT_FIELD}
     assert result.value["child_rank"] == 0  # verbatim, not max(1,-1)+1 = 2
     row = await task_space_fixture.read_work_item(str(item["id"]))
     assert _sync_fields_subset(row) == _sync_fields_subset(candidate)
@@ -456,7 +462,7 @@ async def test_sync_move_replay_preserves_source_rank_and_timestamp_verbatim(
     events = await task_space_fixture.visible_events(operation_id="move-fidelity-op")
     assert len(events) == 1
     assert _sync_fields_subset(_wire_value(events[0].payload)) == _sync_fields_subset(candidate)
-    assert set(events[0].payload) == set(candidate) | {PRE_WAITING_FIELD}
+    assert set(events[0].payload) == set(candidate) | {PRE_WAITING_FIELD, DUE_AT_FIELD}
 
 
 @pytest.mark.asyncio
@@ -496,7 +502,7 @@ async def test_sync_status_replay_preserves_completed_at_cancelled_at_verbatim(
     # ★ 2026-09-12（ADR-0003）：verbatim 语义限定在 WORK_ITEM_SYNC_FIELDS 范围内
     #   （pre_waiting 列由服务端自持，入站 candidate 不含它）。
     assert _sync_fields_subset(result.value) == _sync_fields_subset(candidate)
-    assert set(result.value) == set(candidate) | {PRE_WAITING_FIELD}
+    assert set(result.value) == set(candidate) | {PRE_WAITING_FIELD, DUE_AT_FIELD}
     row = await task_space_fixture.read_work_item(str(item["id"]))
     assert _sync_fields_subset(row) == _sync_fields_subset(candidate)
     assert row["status_definition_id"] == completed_id
@@ -506,7 +512,7 @@ async def test_sync_status_replay_preserves_completed_at_cancelled_at_verbatim(
     events = await task_space_fixture.visible_events(operation_id="status-fidelity-op")
     assert len(events) == 1
     assert _sync_fields_subset(_wire_value(events[0].payload)) == _sync_fields_subset(candidate)
-    assert set(events[0].payload) == set(candidate) | {PRE_WAITING_FIELD}
+    assert set(events[0].payload) == set(candidate) | {PRE_WAITING_FIELD, DUE_AT_FIELD}
 
 
 @pytest.mark.asyncio

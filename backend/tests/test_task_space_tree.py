@@ -38,10 +38,14 @@ PRE_WAITING_FIELD = "pre_waiting_status_definition_id"
 
 
 def _sync_candidate(item: Mapping[str, object], **changes: object) -> dict:
-    """Client outbound workItem post-image: wire rows carry the pre-waiting column
-    but the inbound push contract stays exact — strip it here."""
+    """Client outbound workItem post-image: wire rows carry the server-owned
+    columns but the inbound push contract stays exact — strip them here."""
     candidate = {**item, **changes}
     candidate.pop(PRE_WAITING_FIELD, None)
+    # ★ 2026-10-03（space_018）：due_at 本阶段只出不进 —— 出站事件按模型驱动
+    #   全列带出，入站白名单（WORK_ITEM_SYNC_FIELDS）尚未放行，携带即拒。
+    #   工单②放行入站后本剔除仍合法（老客户端形态，缺省由服务端继承）。
+    candidate.pop("due_at", None)
     return candidate
 
 
@@ -60,6 +64,8 @@ WORK_ITEM_POST_IMAGE_FIELDS = {
     "completion_window_end",
     "review_point",
     "hard_deadline",
+    # ★ 2026-10-03（space_018）：截止日期 —— 出站事件/查询行按模型驱动全列携带。
+    "due_at",
     "effort_estimate_lower_seconds",
     "effort_estimate_upper_seconds",
     "effort_actual_seconds",
@@ -78,9 +84,19 @@ WORK_ITEM_POST_IMAGE_FIELDS = {
 }
 
 
+# ★ 2026-10-03（space_018）：due_at 出站已带（模型驱动全列 + 行形状闸门要求），
+#   但 018 阶段入站白名单尚未放行。工单②把它加进 WORK_ITEM_SYNC_FIELDS 后
+#   本集合必须改为空集 —— 该不变量会随之收紧。
+WORK_ITEM_INBOUND_PENDING_FIELDS = {"due_at"}
+
+
 def test_work_item_sync_candidate_shape_matches_every_ts0_post_image_field() -> None:
-    # 入站集合保持精确相等（不含新列）；出站集合 = 入站集合 + 等待前态。
-    assert WORK_ITEM_SYNC_FIELDS == WORK_ITEM_POST_IMAGE_FIELDS - {PRE_WAITING_FIELD}
+    # 出站字段集 = 入站白名单 + 等待前态（永久只出站）+ 本阶段待放行字段。
+    # 不允许出现任何其它未知出站字段。
+    assert (
+        WORK_ITEM_SYNC_FIELDS | {PRE_WAITING_FIELD} | WORK_ITEM_INBOUND_PENDING_FIELDS
+        == WORK_ITEM_POST_IMAGE_FIELDS
+    )
 
 
 @pytest.mark.asyncio
