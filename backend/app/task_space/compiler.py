@@ -690,6 +690,17 @@ async def _compile_TransitionWorkItem(self, context, request):
         overlay, item["parent_id"], str(item["project_id"])
     ) + 1
     if status["category"] == "completed" and item_depth == 2:
+        # ★ 2026-10-03（能力约束裁决）：这个条件的范围是**有意收窄**的，勿随手放宽：
+        #   - 只拦 item_depth == 2：基线 §2.6（DOMAIN_BASELINE_APPROVAL.md）明文
+        #     「二级完成时若仍有活动三级项，用户必须选择」，强制消解精确限定在
+        #     二级→三级；一级带活跃二级未被基线覆盖（固化测试
+        #     test_completing_level1_with_active_level2_is_permitted）。
+        #   - 只拦 completed：生命周期表（WORKITEM_LIFECYCLE_REVIEW.md §6）给
+        #     cancelled 的可选提示仅「取消原因」；上游 §6 对取消只要求「展示影响，
+        #     不自动改子项」（展示级 ≠ 阻止），ADR-0004 的取消走依赖域显式 resolution。
+        #     （固化测试 test_cancelling_level2_with_active_level3_is_permitted。）
+        #   前端 openChildCount 提示（tree-filter.ts::countOpenChildren + 详情面板
+        #   depth===2 分级文案）与本条件逐项同范围 —— 改这里必须同步改前端。
         # ★ 2026-10-02（状态双轴）：`paused` 已并入 in_progress（迁移 space_017）。
         #   这里**必须**同步 —— 否则被合并到 in_progress 的行不再属于「活动类目」，
         #   父项完成时会误触发 active_child_conflict（静默的行为错误，不报错）。

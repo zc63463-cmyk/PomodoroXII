@@ -298,6 +298,57 @@ async def test_completing_level2_with_active_level3_is_rejected(task_space_fixtu
 
 
 @pytest.mark.asyncio
+async def test_completing_level1_with_active_level2_is_permitted(task_space_fixture) -> None:
+    # 基线 §2.6（DOMAIN_BASELINE_APPROVAL.md）只把强制消解限定在「二级完成 +
+    # 活动三级」；一级带活跃二级不在该条款内，compiler 的 item_depth == 2 是
+    # 精确照抄该范围。此测试钉死 L1 不拦是**有意行为**，防止未来被无意加严。
+    project = await task_space_fixture.create_project(
+        command_id="l1-permitted-project", key="L1PERM"
+    )
+    root = await task_space_fixture.create_work_item(
+        project.value["id"], "Root", None, "l1-permitted-root"
+    )
+    await task_space_fixture.create_work_item(
+        project.value["id"], "Still active", root.value["id"], "l1-permitted-child"
+    )
+
+    outcome = await task_space_fixture.transition_work_item(
+        "complete-level1-with-active-child",
+        root.value["id"],
+        int(root.value["version"]),
+        task_space_fixture.status_id("completed"),
+    )
+
+    assert not isinstance(outcome, TaskSpaceRejected)
+    reopened = await task_space_fixture.read_work_item(root.value["id"])
+    assert reopened["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelling_level2_with_active_level3_is_permitted(task_space_fixture) -> None:
+    # active_child_conflict 只约束 completed 类目：基线 §2.6 只写了「完成」，
+    # 生命周期表（WORKITEM_LIFECYCLE_REVIEW.md §6）给 cancelled 的可选提示仅
+    # 「取消原因」，上游 §6 也只要求取消时「展示影响，不自动改子项」——
+    # 展示级语义，不是阻止。钉死 cancel 不拦同样是有意行为。
+    level2 = await task_space_fixture.seed_level2("cancel-active-child")
+    await task_space_fixture.create_work_item(
+        level2["project_id"], "Still active", level2["id"], "cancel-active-child"
+    )
+
+    outcome = await task_space_fixture.transition_work_item(
+        "cancel-with-active-child",
+        level2["id"],
+        level2["version"],
+        task_space_fixture.status_id("cancelled"),
+    )
+
+    assert not isinstance(outcome, TaskSpaceRejected)
+    cancelled = await task_space_fixture.read_work_item(level2["id"])
+    assert cancelled["cancelled_at"] is not None
+    assert cancelled["completed_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_list_work_items_is_a_stable_flat_project_page(task_space_fixture) -> None:
     tree = await task_space_fixture.seed_out_of_order_tree()
     page = await task_space_fixture.queries.list_work_items(
