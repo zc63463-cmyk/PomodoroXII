@@ -12,9 +12,9 @@
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.task_space import CommandId, WireModel, WireResponseModel
 
@@ -134,3 +134,64 @@ class ResolveRelationRequest(WireModel):
     from_work_item_id: str = Field(min_length=1, max_length=64)
     to_work_item_id: str = Field(min_length=1, max_length=64)
     relation_type: RelationTypeLiteral
+
+
+# --------------------------------------------------------------------------- #
+# Dependency-graph projection (ADR-0008 D19-b) — MindCanvas GraphJsonPayload
+# --------------------------------------------------------------------------- #
+# ★ 为什么**不**继承 WireModel：kernel 契约（``@mindcanvas/kernel``
+#   ``adapters/graphJsonAdapter.ts``）把线格式键名钉死为 snake_case
+#   （``source_hash`` / ``in_degree`` / ``topological_order`` / ``file_path``），
+#   而 WireModel 的 ``to_camel`` 别名生成器会把它们驼峰化 → 前端适配器收不到。
+#   这组模型是「对外协议镜像」，不是本服务的一般业务实体 —— 键名以协议为准。
+#   ``from_`` 字段经 FastAPI 的 by_alias 序列化输出为 ``"from"``。
+#
+# ★ 方向归一（D19-b）：边恒为 **上游 blocker → 下游 blocked**（``direction="fwd"``）。
+#   DB 规范行是 ``from=被阻断方 / to=阻断方``，投影时翻转端点；在该方向下语义为真
+#   的 kind 是 ``blocks``（``A depends_on B`` ⟺ ``B blocks A``），declared 原文
+#   保留在 ``metadata.declared_as``。``relates_to`` 不参与阻塞（D12），不入图。
+#
+# ★ 只读派生：本组模型仅作响应投影，依赖事实源仍在 ``relations`` 表，
+#   不落库、不进同步账本（ADR-0008 D19-b 纪律）。
+
+
+class GraphJsonNode(BaseModel):
+    """One work item in the dependency closure."""
+
+    id: str
+    label: str
+    level: str | None = None  # "L1" / "L2" / "L3"（权威父链派生，1-based）
+    kind: str = "work_item"
+    file_path: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphJsonEdge(BaseModel):
+    """One blocking edge, normalized upstream → downstream."""
+
+    # 允许以字段名 ``from_`` 构造（线格式恒输出别名 ``from``）
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
+    kind: str  # "depends_on" | "blocks"（归一后恒 "blocks"；declared 见 metadata）
+    direction: str = "fwd"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphJsonIndices(BaseModel):
+    """Kernel adapter 的森林中心判据：入度 0 = 无上游 blocker 的源头母材。"""
+
+    in_degree: dict[str, int] = Field(default_factory=dict)
+    topological_order: list[str] = Field(default_factory=list)
+
+
+class GraphJsonPayload(BaseModel):
+    """MindCanvas ``GraphJsonPayload`` 契约（前端 ``graphJsonToMindmap`` 直接消费）。"""
+
+    version: str = "1.0.0"
+    domain: str = "task_space"
+    source_hash: str
+    nodes: list[GraphJsonNode]
+    edges: list[GraphJsonEdge]
+    indices: GraphJsonIndices

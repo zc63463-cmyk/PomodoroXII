@@ -418,6 +418,8 @@ class TestFocusSessionModuleIntegration:
     async def test_set_current_plan_item_mutates_plan_row_not_session_only(
         self, focus_fixture,
     ) -> None:
+        from app.focus_session.policy import plan_row_id
+
         await focus_fixture.module.start(
             focus_fixture.scope, self._start_command()
         )
@@ -425,7 +427,8 @@ class TestFocusSessionModuleIntegration:
             "owner_device_id": "device-a",
             "owner_tab_id": "tab-a",
             "work_item_id": None,
-            "expected_plan_versions": {"plan-fs-1-l3-a": 1},
+            # 计划行 id 由 plan_row_id 派生（2026-09-30 起；旧字面量 plan-fs-1-l3-a）
+            "expected_plan_versions": {plan_row_id("fs-1", "l3-a"): 1},
         }
         command = FocusSessionCommand(
             command_id="current-plan-clear",

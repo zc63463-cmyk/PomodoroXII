@@ -37,6 +37,15 @@ export interface SessionReviewProps {
    * 只在 readOnly 分支渲染，待复盘（可写）态没有回跳入口。
    */
   onReturnToTasks?: () => void
+  /**
+   * ★ 2026-10-02（PXII-FEAT-REVIEW-HARVEST）：复盘提炼卡片。
+   * 页面把「本会话岛的思考节点 → 待办沉淀 / 笔记注入」这块 UI 作为 ReactNode
+   * 注入，本组件只负责**挂载位置**（可写态表单之后、页脚之前）——
+   * 提炼的数据与副作用（建 WorkItem / 写 session_note）全在页面，复盘面板
+   * 不认识导图，也就不会把导图失败传染成复盘失败（fail-soft）。
+   * 只读完成态**不**挂载：提炼是"结案动作"，完成态只剩回看。
+   */
+  harvestSlot?: ReactNode
   onDraftChange: (draft: SessionReviewDraft) => void | Promise<void>
   onSubmit: (draft: SessionReviewDraft) => void | Promise<void>
   onReconcile: (commandId: string, requestedReplaySafe: boolean) => void | boolean | Promise<void | boolean>
@@ -124,7 +133,7 @@ function reviewCard(children: ReactNode, opts: { title?: string; description?: s
 }
 
 export function SessionReview({ session, plans, envelopes, receipts, draft, readOnly = false,
-  onReturnToTasks, onDraftChange, onSubmit, onReconcile, onAbandon }: SessionReviewProps) {
+  onReturnToTasks, harvestSlot, onDraftChange, onSubmit, onReconcile, onAbandon }: SessionReviewProps) {
   const focusedLabel = useMemo(() => formatFocused(session.focusedSeconds), [session.focusedSeconds])
 
   if (session.ownershipState === 'activation_conflict') {
@@ -275,6 +284,11 @@ export function SessionReview({ session, plans, envelopes, receipts, draft, read
             ),
           )
         }),
+        // ★ PXII-FEAT-REVIEW-HARVEST：提炼卡片插在复盘表单之后、页脚（提交 / 收据）之前。
+        //   位置即语义：先落结果字段，再决定要不要把图里的思考带走。
+        harvestSlot
+          ? createElement('div', { key: 'harvest', className: 'harvest-mount' }, harvestSlot)
+          : null,
       ),
       createElement(CardFooter, { key: 'footer', className: 'flex-col items-stretch gap-3' },
         envelopes.length > 0 || receipts.length > 0

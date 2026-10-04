@@ -8,6 +8,7 @@ or transaction owner is created.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from collections.abc import Callable, Mapping
@@ -558,7 +559,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         )
         plan_rows = tuple(
             _plan_row(
-                id=f"plan-{session_id}-{l3_id}",
+                id=plan_row_id(session_id, str(l3_id)),
                 session_id=session_id,
                 work_item_id=str(l3_id),
                 title_snapshot=str(
@@ -1855,7 +1856,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             if _work_item_depth(context.authority, work_item) != 3:
                 raise _MutationRuleViolation("invalid_work_item_tree", {"reason": "plan_depth"})
             plan = _plan_row(
-                id=f"plan-{session_id}-{work_item_id}",
+                id=plan_row_id(session_id, work_item_id),
                 session_id=session_id,
                 work_item_id=work_item_id,
                 title_snapshot=str(work_item.get("title", "")),
@@ -3314,6 +3315,33 @@ def _attribution_row(
         "corrected_from_revision": corrected_from_revision,
         "effective": effective,
     })
+
+
+def plan_row_id(session_id: str, work_item_id: str) -> str:
+    """会话计划行的稳定 id —— 确定性派生（重放幂等）+ 长度契约。
+
+    ★ 2026-09-30 实测修复：旧格式 ``plan-{session_id}-{work_item_id}`` 在真实 id
+    （36 字符会话 UUID + 32 位十六进制工作项）下长 **74 字符**，同时违反两处契约：
+
+    - DB：``session_work_item_plans.id`` 为 ``String(36)``（SQLite 不强制宽度，
+      但契约如此；前端离线路径造行用的就是 36 字符 UUID）
+    - wire：``SessionWorkItemPlanResponse.id`` ``max_length=64`` →
+      响应校验在事务**提交之后**执行，于是"带三级计划的会话启动"必 500，
+      且服务端**已留下孤儿活跃会话**（本机实测复现）。
+
+    修复：与其他实体同一纪律的派生哈希（同 ``deps.entity_id_for_operation``）——
+    ``sha256("session-plan-v1\\0{session_id}\\0{work_item_id}")[:32]``。
+    确定性保证同一 (会话, 工作项) 永远得到同一 id（重放/重试不产生第二行），
+    32 字符同时满足 DB ``String(36)`` 与 wire ``max_length=64``。
+
+    不改用随机 UUID（前端离线路径的做法）的原因：启动/加项命令重放时，
+    派生 id 让"同键同 id"天然幂等（PK 相同 → 行级覆盖），随机 id 会在唯一约束
+    ``uq_session_work_item_plan(session_id, work_item_id)`` 上撞 IntegrityError。
+    """
+    digest = hashlib.sha256(
+        f"session-plan-v1\0{session_id}\0{work_item_id}".encode("utf-8")
+    ).hexdigest()
+    return digest[:32]
 
 
 def _plan_row(

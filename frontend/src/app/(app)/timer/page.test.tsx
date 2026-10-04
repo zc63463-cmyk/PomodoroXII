@@ -19,7 +19,47 @@ import { useTimerStore } from '@/stores/timer-store'
 const pushMock = vi.fn()
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: pushMock }) }))
 
-const fakeDatabase = vi.hoisted(() => ({ focusSessions: { get: vi.fn(async () => undefined) } }))
+/**
+ * D13 步 3-4b：结束态「岛总览」要走 `readLocalAggregate` 的**真实表访问路径**，
+ * 故 fakeDatabase 从"只有 focusSessions.get"扩成「可变 store + 通用表链桩」。
+ * 既有用例只用到 `focusSessions.get`（store 默认为空 → 与原行为等价）。
+ */
+const fakeStore = vi.hoisted(() => ({
+  focusSessions: [] as Array<Record<string, unknown>>,
+  sessionTaskContexts: [] as Array<Record<string, unknown>>,
+  sessionAttributionRevisions: [] as Array<Record<string, unknown>>,
+  sessionWorkItemPlans: [] as Array<Record<string, unknown>>,
+  sessionWorkItemOutcomes: [] as Array<Record<string, unknown>>,
+  sessionCommandEnvelopes: [] as Array<Record<string, unknown>>,
+}))
+const fakeDatabase = vi.hoisted(() => {
+  const table = (key: keyof typeof fakeStore) => {
+    const rows = () => fakeStore[key]
+    const chain = {
+      first: async () => rows()[0],
+      toArray: async () => rows(),
+      count: async () => rows().length,
+    }
+    return {
+      get: async () => rows()[0],
+      toArray: async () => rows(),
+      where: () => ({ equals: () => chain }),
+      orderBy: () => ({ toArray: async () => rows(), reverse: () => ({ toArray: async () => rows() }) }),
+      put: async () => undefined,
+      add: async () => undefined,
+      delete: async () => undefined,
+    }
+  }
+  return {
+    focusSessions: table('focusSessions'),
+    sessionTaskContexts: table('sessionTaskContexts'),
+    sessionAttributionRevisions: table('sessionAttributionRevisions'),
+    sessionWorkItemPlans: table('sessionWorkItemPlans'),
+    sessionWorkItemOutcomes: table('sessionWorkItemOutcomes'),
+    sessionCommandEnvelopes: table('sessionCommandEnvelopes'),
+    sessionReviewDrafts: table('sessionCommandEnvelopes'),
+  }
+})
 vi.mock('@/services/space-db', () => ({
   spaceDBManager: { currentBinding: { database: fakeDatabase, spaceId: 'space-1' } },
 }))
@@ -34,9 +74,11 @@ vi.mock('@/lib/task-space/work-item-note-repository', () => ({
     appendBlocks = vi.fn()
   },
 }))
+/** 结束态总览用例需要控制「本地缓存会话列表」（默认空 = 既有行为）。 */
+const focusListCachedMock = vi.hoisted(() => vi.fn(async () => [] as Array<Record<string, unknown>>))
 vi.mock('@/lib/focus-session/focus-session-repository', () => ({
   FocusSessionRepository: class {
-    listCached = async () => []
+    listCached = focusListCachedMock
     addPlanItem = vi.fn().mockResolvedValue(undefined)
   },
   readSessionCommandReceipts: async () => [],
@@ -57,6 +99,29 @@ vi.mock('@/lib/task-space/timer-note-composer-draft-registry', () => ({
 const fetchFocusSummaryWindowMock = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/stats/stats-api', () => ({
   fetchFocusSummaryWindow: fetchFocusSummaryWindowMock,
+}))
+
+// ★ ADR-0008 S2 收口：建岛编排在页面测试里桩掉（真实行为见
+//   session-island-launch.test.ts）；这里只断言"启动成功后确实带着
+//   选中的 L3 调了它"这条接线本身。
+//   2026-10-01：拆解路径复用**同一份**岛标题口径（formatSessionIslandTitle），
+//   故 mock 必须连它一起给 —— 否则页面在模块解析期就抛
+//   「No "formatSessionIslandTitle" export is defined on the mock」。
+const createLaunchSessionIslandsMock = vi.hoisted(() => vi.fn().mockResolvedValue({
+  created: [], skipped: [], failed: [],
+}))
+vi.mock('@/lib/work-map/session-island-launch', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  createLaunchSessionIslands: createLaunchSessionIslandsMock,
+}))
+
+// ★ ADR-0008 D13 步 1：运行态导图端口读当前 L3 的 `.mm.md`（真实网络 → 桩掉）。
+//   默认「尚无导图」（null）；接线断言见「运行态导图端口」describe。
+const readWorkMapMock = vi.hoisted(() => vi.fn())
+const writeWorkMapMock = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/work-map/work-map-api', () => ({
+  readWorkMap: readWorkMapMock,
+  writeWorkMap: writeWorkMapMock,
 }))
 
 const coordinatorSpies = vi.hoisted(() => ({
@@ -94,6 +159,13 @@ const aggregate = {
  */
 function seedRunningTimerPage(): void {
   vi.clearAllMocks()
+  readWorkMapMock.mockReset()
+  readWorkMapMock.mockResolvedValue(null)
+  writeWorkMapMock.mockReset()
+  writeWorkMapMock.mockResolvedValue(0)
+  focusListCachedMock.mockReset()
+  focusListCachedMock.mockResolvedValue([])
+  for (const rows of Object.values(fakeStore)) rows.length = 0
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
@@ -127,7 +199,7 @@ function seedRunningTimerPage(): void {
   } as never)
 }
 
-describe('TimerPage 运行中新建三级（工单②）', () => {
+describe('TimerPage 运行中拆解行动（工单②）', () => {
   beforeEach(seedRunningTimerPage)
 
   it('创建被调用时 parentId = 会话二级项；成功后新项加入计划、输入清空', async () => {
@@ -142,7 +214,7 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
     render(createElement(TimerPage))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
-    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
     await waitFor(() => expect(createChild).toHaveBeenCalledWith('l2-x', { title: '新三级 A' }))
     await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
@@ -161,7 +233,7 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
     render(createElement(TimerPage))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '离线想建' } })
-    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
     const alerts = await screen.findAllByRole('alert')
     expect(alerts.map((node) => node.textContent).join('\n')).toContain('offline_formal_creation_forbidden')
@@ -234,10 +306,563 @@ describe('TimerPage 沉浸模式与二级归属（工单 B 2026-09-14）', () =>
   })
 })
 
+// ── ADR-0008 D13 步 1：运行态导图端口「当前会话岛」─────────────────────────
+/** 会话 session-a 的岛文件（形状与真实产出一致；session_id 对齐 runningSession）。 */
+const ISLAND_FOR_RUNNING = `<!--
+next_cid: 2
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# Verify output
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+### Verify output
+`
+/** 带一个**可编辑节点**（cid c2）的岛 —— 节点编辑页面接线断言。 */
+const ISLAND_EDITABLE_FOR_RUNNING = `<!--
+next_cid: 3
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# Verify output
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+### Verify output
+<!--
+thought_type: "problem"
+cid: "c2"
+-->
+### 旧标题
+`
+describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
+  beforeEach(seedRunningTimerPage)
+  it('★ 以当前投入 L3 读导图；中央编辑区与小视图**各自**渲染同一棵树', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    render(createElement(TimerPage))
+    // 读的键 = 当前计划项的 L3（focusedWorkItemId），不是二级项
+    await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
+    // 中央编辑区（D15：焦点区下半）
+    const editor = await screen.findByTestId('timer-map-editor')
+    expect(editor.querySelector('svg.wm-tree')).not.toBeNull()
+    expect(screen.getByTestId('map-editor-canvas')).toBeTruthy()
+    // 右栏小视图
+    expect(screen.getByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'false')
+    expect(screen.getByTestId('map-port-canvas')).toBeTruthy()
+    // 两处都出现会话节点（同一份几何渲染两次）
+    expect(screen.getAllByTestId('wm-session-node').length).toBe(2)
+  })
+  it('★ 会话发端枢纽与顶栏标题（PXII-FEAT-SESSION-HUB）：两处渲染器都上浮标题、收拢岛根', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    render(createElement(TimerPage))
+    const editor = await screen.findByTestId('timer-map-editor')
+    const port = screen.getByTestId('timer-map-port')
+    for (const [scope, root] of [['编辑区', editor], ['小视图', port]] as const) {
+      // ① 岛根 = 发端枢纽（外环 + 中心亮点），当前会话态
+      const hub = root.querySelector('[data-testid="wm-session-hub"]')
+      expect(hub, `${scope} 应渲染发端枢纽`).not.toBeNull()
+      expect(hub).toHaveAttribute('data-hub-current', 'true')
+      expect(hub!.querySelector('.wm-hub-ring')).not.toBeNull()
+      expect(hub!.querySelector('.wm-hub-core')).not.toBeNull()
+      // ② 画布内不再有会话节点的矩形卡与截断标题
+      const sessionNode = root.querySelector('.wm-node[data-session="true"]')!
+      expect(sessionNode.querySelector('rect.wm-box')).toBeNull()
+      expect(sessionNode.querySelector('.wm-text')).toBeNull()
+      // ③ 完整会话标题上浮到地标卡顶栏：可见文本按可用宽度自适应（窄岛会截断补
+      //    `…`），**全文恒在** `data-full-title` 与包裹 <title> tooltip 里（信息不丢）
+      const title = root.querySelector('[data-testid="wm-island-title"]')
+      expect(title, `${scope} 应渲染顶栏标题`).not.toBeNull()
+      expect(title!.getAttribute('data-full-title')).toBe('09-30 19:55 会话')
+      expect(title!.textContent).not.toBe('')
+      expect(
+        title!.textContent === '09-30 19:55 会话' ||
+          (title!.textContent!.endsWith('…') &&
+            '09-30 19:55 会话'.startsWith(title!.textContent!.slice(0, -1))),
+        `${scope} 顶栏标题应为全文或全文前缀 + …（实得 ${title!.textContent}）`,
+      ).toBe(true)
+      expect(
+        root.querySelector('[data-testid="wm-island-title-wrap"] title')?.textContent,
+      ).toBe('09-30 19:55 会话')
+      // 画布内原本被截断成 `09-30 19:55 会…` 的会话节点文本已彻底消失
+      expect(sessionNode.querySelector('.wm-text')).toBeNull()
+      expect(root.querySelector('[data-testid="wm-island-card"]')).toHaveClass(
+        'wm-island-card--current',
+      )
+    }
+  })
+  it('★ 沉浸切换：小视图 data-minimal 翻转、编辑区保留（D15：记录面常驻中央）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    render(createElement(TimerPage))
+    expect(await screen.findByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '沉浸模式' }))
+    // 极简岛：小视图同一 DOM 派生（卡片仍在，只是 data-minimal=true → CSS 隐文字）
+    const port = screen.getByTestId('timer-map-port')
+    expect(port).toHaveAttribute('data-minimal', 'true')
+    expect(port.querySelectorAll('.wm-node').length).toBe(2)
+    // 渐隐标记只打在伴奏卡上：小视图刻意**不带** .timer-immersive-fade
+    expect(port.className).not.toContain('timer-immersive-fade')
+    expect(screen.getByTestId('immersive-region').querySelectorAll('.timer-immersive-fade').length)
+      .toBeGreaterThan(0)
+    // ★ 用户 2026-10-01 裁决：沉浸时**中央编辑区保留**（不在渐隐区、仍在 DOM）
+    const editor = screen.getByTestId('timer-map-editor')
+    expect(screen.getByTestId('immersive-region').contains(editor)).toBe(false)
+    expect(editor.querySelector('svg.wm-tree')).not.toBeNull()
+  })
+  it('无导图（读回 null）→ 两处都显示占位，页面不炸（fail-soft）', async () => {
+    render(createElement(TimerPage))
+    expect(await screen.findByTestId('map-port-empty')).toBeTruthy()
+    expect(screen.getByTestId('map-editor-empty')).toBeTruthy()
+    expect(screen.queryByTestId('map-port-canvas')).toBeNull()
+  })
+  it('★ 快速记录（D13 步 2 → D15 迁至编辑区）：类型 + 文本 → 写出追加后的导图并即时可见', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(128)
+    render(createElement(TimerPage))
+    fireEvent.click(await screen.findByTestId('map-quick-problem'))
+    fireEvent.change(screen.getByTestId('map-quick-input'), { target: { value: 'token 对照' } })
+    fireEvent.click(screen.getByTestId('map-quick-submit'))
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledTimes(1))
+    const [workItemId, written] = writeWorkMapMock.mock.calls[0] as [string, string]
+    expect(workItemId).toBe('l3-a') // 写的是当前投入 L3 的导图
+    expect(written).toContain('thought_type: "problem"')
+    expect(written).toContain('### token 对照')
+    // 即时反映（本地 state 已更新，无需再读一次服务端）。
+    // 注意：中央编辑区与右栏小视图都会渲染该文本（同一份几何渲染两次）
+    // → 用 canvas 作用域断言，避免多重命中歧义。
+    const canvas = screen.getByTestId('map-editor-canvas')
+    await waitFor(() => expect(canvas.textContent).toContain('token 对照'))
+  })
+  it('★ 节点编辑接线：改名 → writeWorkMap 收到含新标题、不含旧标题的文本（本地即时反映）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(64)
+    render(createElement(TimerPage))
+    const canvas = await screen.findByTestId('map-editor-canvas')
+    const node = canvas.querySelector('.wm-node[data-cid="c2"]')
+    expect(node).not.toBeNull()
+    fireEvent.click(node!)
+    fireEvent.click(screen.getByTestId('map-action-rename'))
+    fireEvent.change(screen.getByTestId('map-action-input'), { target: { value: '新标题' } })
+    fireEvent.click(screen.getByTestId('map-action-submit'))
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledTimes(1))
+    const [workItemId, written] = writeWorkMapMock.mock.calls[0] as [string, string]
+    expect(workItemId).toBe('l3-a')
+    expect(written).toContain('### 新标题')
+    expect(written).not.toContain('### 旧标题')
+    // 即时反映（不等下一次读）：编辑区画布已含新标题
+    await waitFor(() =>
+      expect(screen.getByTestId('map-editor-canvas').textContent).toContain('新标题'),
+    )
+  })
+  it('★ 节点编辑接线：删除二次确认 → 文本少一个节点、该 cid 消失', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(48)
+    render(createElement(TimerPage))
+    const canvas = await screen.findByTestId('map-editor-canvas')
+    fireEvent.click(canvas.querySelector('.wm-node[data-cid="c2"]')!)
+    fireEvent.click(screen.getByTestId('map-action-delete'))
+    expect(writeWorkMapMock).not.toHaveBeenCalled() // 第一次点击只确认
+    fireEvent.click(screen.getByTestId('map-action-delete'))
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledTimes(1))
+    const written = writeWorkMapMock.mock.calls[0][1] as string
+    expect(written).not.toContain('cid: "c2"')
+    expect(written).not.toContain('### 旧标题')
+    expect(written).toContain('### Verify output')
+  })
+  it('★ 点即定位（ADR-0008 D15）：小视图点击带 cid 节点 → 中央编辑区对应节点获得 wm-node--focus 环，存量无 cid 节点不响应', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    render(createElement(TimerPage))
+    const port = await screen.findByTestId('timer-map-port')
+    const editor = screen.getByTestId('timer-map-editor')
+    // 初始状态：无 focus 环
+    expect(editor.querySelector('.wm-node--focus')).toBeNull()
+    // 1. 在右栏小视图中点击带 cid 的思考节点（cid="c2"）
+    const portThoughtNode = port.querySelector('.wm-node[data-thought="problem"]')
+    expect(portThoughtNode).not.toBeNull()
+    fireEvent.click(portThoughtNode!)
+    // 中央编辑区中对应节点出现 focus 环
+    const editorThoughtNode = editor.querySelector('.wm-node[data-thought="problem"]')
+    expect(editorThoughtNode).toHaveClass('wm-node--focus')
+    expect(editorThoughtNode).toHaveAttribute('data-focus', 'true')
+    // 2. 点击右栏小视图的会话节点（带 cid="c1"）
+    const portSessionNode = port.querySelector('[data-testid="wm-session-node"]')
+    expect(portSessionNode).not.toBeNull()
+    fireEvent.click(portSessionNode!)
+    const editorSessionNode = editor.querySelector('[data-testid="wm-session-node"]')
+    expect(editorSessionNode).toHaveClass('wm-node--focus')
+    expect(editorThoughtNode).not.toHaveClass('wm-node--focus')
+    // 3. 点击无 cid 存量标题行：不触发定位
+    const portReadonlyNode = port.querySelector('.wm-node[data-readonly="true"]')
+    expect(portReadonlyNode).not.toBeNull()
+    fireEvent.click(portReadonlyNode!)
+    const editorStockNode = editor.querySelector('.wm-node:not([data-session="true"])[data-readonly="true"]')
+    expect(editorStockNode).not.toHaveClass('wm-node--focus')
+  })
+  it('★ 沉浸极简态下点即定位仍生效，写回操作成功后清空 focus 环', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(128)
+    render(createElement(TimerPage))
+    // 进入沉浸模式
+    fireEvent.click(await screen.findByRole('button', { name: '沉浸模式' }))
+    const port = screen.getByTestId('timer-map-port')
+    expect(port).toHaveAttribute('data-minimal', 'true')
+    const editor = screen.getByTestId('timer-map-editor')
+    // 极简态下点小视图思考节点
+    const portThoughtNode = port.querySelector('.wm-node[data-thought="problem"]')
+    fireEvent.click(portThoughtNode!)
+    const editorThoughtNode = editor.querySelector('.wm-node[data-thought="problem"]')
+    expect(editorThoughtNode).toHaveClass('wm-node--focus')
+    // 快速记录一条新思路 → 写回成功后清空 focus 环
+    fireEvent.click(screen.getByTestId('map-quick-todo'))
+    fireEvent.change(screen.getByTestId('map-quick-input'), { target: { value: '新待办' } })
+    fireEvent.click(screen.getByTestId('map-quick-submit'))
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalled())
+    // focus 环已被清空
+    await waitFor(() => expect(editor.querySelector('.wm-node--focus')).toBeNull())
+  })
+})
+// ── PXII-FEAT-PLAN-CHECKOFF / PORT-FOCUS-SYNC：导图与执行计划深度联动 ──────
+/**
+ * 会话岛下挂**两个** L3 子岛（标题 = 计划项的 `titleSnapshot`），
+ * 供「卡片打勾 → 完成状态机」「小视图专注跟随」两条页面级接线断言。
+ */
+const ISLAND_ARCHIPELAGO_FOR_RUNNING = `<!--
+next_cid: 5
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# Verify output
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+<!--
+cid: "c2"
+-->
+### Verify output
+<!--
+cid: "c3"
+-->
+### 第二个子任务
+`
+describe('TimerPage 导图与执行计划联动（PXII-FEAT-PLAN-CHECKOFF / PORT-FOCUS-SYNC）', () => {
+  beforeEach(seedRunningTimerPage)
+  it('★ 导图卡片打勾 → 复用 setCompletion 状态机（coordinator.setCompletionDraft 收到 planItemId 与取反值）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+    const editor = await screen.findByTestId('timer-map-editor')
+    const check = await waitFor(() => {
+      const hit = editor.querySelector('[data-testid="wm-sub-island-check"]')
+      expect(hit).not.toBeNull()
+      return hit!
+    })
+    // 计划项 plan-a 的 titleSnapshot = 'Verify output'，初始未完成
+    expect(check.getAttribute('data-completed')).toBe('false')
+    fireEvent.click(check)
+    await waitFor(() =>
+      expect(coordinatorSpies.setCompletionDraft).toHaveBeenCalledWith({
+        sessionId: 'session-a',
+        planItemId: 'plan-a',
+        completionDraft: true,
+      }),
+    )
+  })
+  it('★ 未加入本次计划的子岛（第二个子任务）→ 导图上没有打勾入口（不画假按钮）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+    const editor = await screen.findByTestId('timer-map-editor')
+    await waitFor(() =>
+      expect(editor.querySelectorAll('[data-testid="wm-sub-island-check"]')).toHaveLength(1),
+    )
+    // 小视图是纯展示（不传 plans）→ 零打勾入口
+    const port = screen.getByTestId('timer-map-port')
+    expect(port.querySelector('[data-testid="wm-sub-island-check"]')).toBeNull()
+  })
+  it('★ 小视图默认专注跟随：currentPlanTitle 命中子岛 → 模式胶囊与 data-view-mode 就位', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+    const port = await screen.findByTestId('timer-map-port')
+    expect(port).toHaveAttribute('data-view-mode', 'focused')
+    expect(screen.getByTestId('map-port-mode-toggle')).toBeTruthy()
+    expect(screen.getByTestId('map-port-mode-focused')).toHaveAttribute('aria-pressed', 'true')
+    // 当前计划项 = 'Verify output' → 命中子岛 → data-follow=true（viewBox 已框到该岛）
+    await waitFor(() =>
+      expect(screen.getByTestId('map-port-canvas')).toHaveAttribute('data-follow', 'true'),
+    )
+  })
+  it('★ 小视图切到全景：data-follow 关闭、模式胶囊翻转，且**编辑区不受影响**', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+    const port = await screen.findByTestId('timer-map-port')
+    await waitFor(() =>
+      expect(screen.getByTestId('map-port-canvas')).toHaveAttribute('data-follow', 'true'),
+    )
+    const editorNodesBefore = screen.getByTestId('timer-map-editor').querySelectorAll('.wm-node').length
+    fireEvent.click(screen.getByTestId('map-port-mode-all'))
+    expect(port).toHaveAttribute('data-view-mode', 'all')
+    expect(screen.getByTestId('map-port-mode-all')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('map-port-canvas')).toHaveAttribute('data-follow', 'false')
+    // 编辑区是独立组件实例：小视图换模式不动它（同一份渲染器、各自持有视口）
+    expect(screen.getByTestId('timer-map-editor').querySelectorAll('.wm-node').length)
+      .toBe(editorNodesBefore)
+  })
+})
+// ── 2026-10-01：拆解 = 创建 + 导图生长 + 自动切为当前专注项 ────────────────
+/** 新 L3 的图：本次会话的岛已在（启动时按勾选建过），但还没有这次拆解的子行动。 */
+const ISLAND_FOR_NEW_L3 = `<!--
+next_cid: 2
+centers:
+  - at: "node:新三级 A/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# 新三级 A
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+`
+describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）', () => {
+  beforeEach(seedRunningTimerPage)
+  /** 让 store.createChild 复刻真实行为（先落 workItems 再返回），并返回 spy。 */
+  function seedCreateChild(): ReturnType<typeof vi.fn> {
+    const createChild = vi.fn(async (parentId: string, input: { title?: string }) => {
+      const created = { id: 'l3-new', depth: 3, parentId, title: input.title, displayKey: 'P-9', version: 1 }
+      useTaskSpaceStore.setState((current) => ({ workItems: [...current.workItems, created] }) as never)
+      return created
+    })
+    useTaskSpaceStore.setState({ createChild } as never)
+    return createChild
+  }
+  it('★ 方案 A：新建成功后保持在当前专注项（不切走焦点），新项加入计划', async () => {
+    seedCreateChild()
+    render(createElement(TimerPage))
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
+    // 新项成功加入计划
+    await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
+      expect.objectContaining({ workItemId: 'l3-new' }),
+    ))
+    // 方案 A 核心断言：当前已有专注项（l3-a）时，不切走焦点，保留上下文
+    expect(coordinatorSpies.setCurrentPlanItem).not.toHaveBeenCalled()
+  })
+  it('★ 导图实时生长：在当前正在查看的大图上直接长出 todo 节点，保持原图上下文不变', async () => {
+    seedCreateChild()
+    let storedCurrent: string = ISLAND_FOR_RUNNING
+    readWorkMapMock.mockImplementation(async (workItemId: string) => {
+      if (workItemId === 'l3-a') return storedCurrent
+      return null
+    })
+    writeWorkMapMock.mockImplementation(async (workItemId: string, text: string) => {
+      if (workItemId === 'l3-a') storedCurrent = text
+      return 128
+    })
+    render(createElement(TimerPage))
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
+    // 写的是**当前查看的 L3（l3-a）**的图，且内容含本次拆解出来的一级子分支
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledWith('l3-a', expect.any(String)))
+    const callsForCurrent = writeWorkMapMock.mock.calls.filter(([id]) => id === 'l3-a')
+    const [, written] = callsForCurrent[0] as [string, string]
+    expect(written).toContain('session_id: "session-a"')
+    expect(written).toContain('### 新三级 A')
+    // 原图原有的内容完全保留（Verify output）
+    expect(written).toContain('### Verify output')
+    // 中央编辑区在原图上长出新节点
+    const canvas = await screen.findByTestId('map-editor-canvas')
+    await waitFor(() => expect(canvas.textContent).toContain('新三级 A'))
+    expect(screen.queryByTestId('map-editor-empty')).toBeNull()
+  })
+  it('新 L3 的图上已有本次会话岛（幂等分支）：不重复建岛，把子行动同步为会话一级子分支', async () => {
+    seedCreateChild()
+    readWorkMapMock.mockImplementation(async (workItemId: string) =>
+      workItemId === 'l3-a' ? ISLAND_FOR_RUNNING : null)
+    writeWorkMapMock.mockResolvedValue(96)
+    render(createElement(TimerPage))
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '拆解出的行动' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledWith('l3-a', expect.any(String)))
+    const calls = writeWorkMapMock.mock.calls.filter(([id]) => id === 'l3-a')
+    const [, written] = calls[0] as [string, string]
+    expect(written).toContain('### 拆解出的行动')
+  })
+  it('导图写失败 fail-soft：拆解照常完成，不弹全局错误', async () => {
+    seedCreateChild()
+    writeWorkMapMock.mockRejectedValue(new Error('work_map_write_failed'))
+    render(createElement(TimerPage))
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
+    // 导图失败不得升级成会话失败：创建 → 入计划仍然走完
+    await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
+      expect.objectContaining({ workItemId: 'l3-new' }),
+    ))
+    // 全局错误条不得出现
+    expect(document.querySelector('main > p[role="alert"]')).toBeNull()
+    expect(screen.queryByTestId('map-quick-error')).toBeNull()
+    // 输入照常清空
+    await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
+  })
+  it('读图失败 fail-soft：readWorkMap 抛错时创建与入计划仍完成', async () => {
+    seedCreateChild()
+    readWorkMapMock.mockRejectedValue(new Error('work_map_read_failed'))
+    render(createElement(TimerPage))
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
+    await waitFor(() => expect(coordinatorSpies.addPlanItem).toHaveBeenCalledWith(
+      expect.objectContaining({ workItemId: 'l3-new' }),
+    ))
+    expect(document.querySelector('main > p[role="alert"]')).toBeNull()
+  })
+  it('空计划无前序项时新建：自动切为新项作为首个专注项', async () => {
+    seedCreateChild()
+    // 模拟空计划场景（无前序 focusedWorkItemId）
+    const current = useTimerStore.getState().locator as { session: typeof aggregate } | null
+    if (current !== null) {
+      useTimerStore.setState({
+        locator: {
+          ...current,
+          session: {
+            ...current.session,
+            plan: [],
+          },
+        },
+      } as never)
+    }
+    render(createElement(TimerPage))
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '首个三级 A' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
+    await waitFor(() => expect(coordinatorSpies.setCurrentPlanItem).toHaveBeenCalledWith(
+      expect.objectContaining({ workItemId: 'l3-new' }),
+    ))
+  })
+  it('拆解表单上方如实说明归属：新项挂在会话的二级项下（不是当前三级项）', async () => {
+    seedCreateChild()
+    render(createElement(TimerPage))
+    expect(await screen.findByTestId('plan-create-parent-hint'))
+      .toHaveTextContent('在「Ship feature」下新建行动项')
+  })
+})
+// ── D13 步 3-4b：结束态「岛总览」──────────────────────────────────────────
+const ENDED_SESSION_ID = 'session-e'
+/** 结束会话所属 L3 的岛（会话岛 + 一个 problem / 一个 todo）。 */
+const ISLAND_FOR_ENDED = `<!--
+next_cid: 4
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "${ENDED_SESSION_ID}"
+-->
+# Verify output
+<!--
+cid: "c1"
+session_id: "${ENDED_SESSION_ID}"
+-->
+## 09-30 19:55 会话
+<!--
+thought_type: "problem"
+cid: "c2"
+-->
+### 甲
+<!--
+thought_type: "todo"
+cid: "c3"
+-->
+### 乙
+`
+/**
+ * 结束态种子：locator / 本地临时皆空 → 走 `focusRepository.listCached()` +
+ * `readLocalAggregate()` 的真实路径把 `endedAggregate` 立起来。
+ */
+function seedEndedTimerPage(): void {
+  focusListCachedMock.mockResolvedValue([
+    {
+      sessionId: ENDED_SESSION_ID, clockState: 'ended', reviewState: 'pending',
+      ownershipState: 'owned', validity: 'pending',
+    },
+  ])
+  fakeStore.focusSessions.push({
+    id: ENDED_SESSION_ID, sessionId: ENDED_SESSION_ID,
+    startedAt: '2026-09-13T08:00:00Z', endedAt: '2026-09-13T08:25:00Z', pauseStartedAt: null,
+    plannedSeconds: 1500, pausedSeconds: 0, focusedSeconds: 1200, breakSeconds: 0,
+    grossSeconds: 1500, timerCompletion: 'completed', clockState: 'ended', version: 2,
+    sessionRevision: 1, validity: 'pending', validityReason: null, reviewState: 'pending',
+    ownershipState: 'owned', sessionType: 'work', overallProgress: null, mood: null,
+    sessionNote: null,
+  })
+  fakeStore.sessionTaskContexts.push({ sessionId: ENDED_SESSION_ID, level2WorkItemId: 'l2-x' })
+  fakeStore.sessionAttributionRevisions.push({ sessionId: ENDED_SESSION_ID, effective: true })
+  fakeStore.sessionWorkItemPlans.push({
+    id: 'plan-e', sessionId: ENDED_SESSION_ID, workItemId: 'l3-a', titleSnapshot: 'Verify output',
+    currentDuringSession: true, completionDraft: false, removedAt: null, planRank: 0,
+  })
+  useTimerStore.setState({
+    locator: null, session: null, localProvisional: null,
+    ownershipMode: 'none', nowMs: Date.parse('2026-09-13T08:26:00Z'), error: null,
+  } as never)
+}
+describe('TimerPage 结束态岛总览（ADR-0008 D13 步 3-4b）', () => {
+  beforeEach(seedRunningTimerPage)
+  it('★ 读结束会话 focused plan item 的 L3 导图；总览挂在复盘面板**下方**且只读', async () => {
+    seedEndedTimerPage()
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_ENDED)
+    render(createElement(TimerPage))
+    // 键 = 结束会话 focused plan item 的 L3（不是二级项）
+    await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
+    const overview = await screen.findByTestId('timer-map-overview')
+    expect(screen.getByTestId('map-overview-canvas')).toBeTruthy()
+    expect(overview).toHaveTextContent('工作导图 · 岛总览')
+    // 「复盘面板下方」= 焦点容器里最后一个直接子（前面是复盘面板）
+    const focusContainer = overview.parentElement as HTMLElement
+    expect(focusContainer.children.length).toBeGreaterThanOrEqual(2)
+    expect([...focusContainer.children].indexOf(overview)).toBe(focusContainer.children.length - 1)
+    // 只读：无编辑入口、无快速记录行
+    expect(overview.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
+    expect(screen.queryByTestId('map-quick')).toBeNull()
+  })
+  it('★ 结束态总览可筛选（图例点「问题」→ 命中高亮、其余 dim、节点数不变）', async () => {
+    seedEndedTimerPage()
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_ENDED)
+    render(createElement(TimerPage))
+    // 先等地图到位（总览容器先出现、canvas 在 endedMapText 落定后才渲染 → 逐步增强）
+    await screen.findByTestId('map-overview-canvas')
+    const overview = screen.getByTestId('timer-map-overview')
+    const total = overview.querySelectorAll('.wm-node').length
+    expect(total).toBeGreaterThan(1)
+    fireEvent.click(screen.getByTestId('map-legend-problem'))
+    expect(overview.querySelectorAll('.wm-node').length).toBe(total) // dim 不 hide
+    expect(overview.querySelectorAll('.wm-node[data-highlight="true"]').length).toBeGreaterThan(0)
+    expect(overview.querySelectorAll('.wm-node[data-dim="true"]').length).toBeGreaterThan(0)
+  })
+})
 // ── 双体系兼容 2026-09-16：准备态 → 启动载荷带模式 ─────────────────────────
 /** 准备态种子：无活动会话（locator / session 皆空）。 */
 function seedIdleTimerPage(): void {
   vi.clearAllMocks()
+  readWorkMapMock.mockReset()
+  readWorkMapMock.mockResolvedValue(null)
+  writeWorkMapMock.mockReset()
+  writeWorkMapMock.mockResolvedValue(0)
+  focusListCachedMock.mockReset()
+  focusListCachedMock.mockResolvedValue([])
+  for (const rows of Object.values(fakeStore)) rows.length = 0
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 0, valid_sessions: 0, interrupted_sessions: 0,
@@ -273,6 +898,137 @@ function seedIdleTimerPage(): void {
 describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
   beforeEach(seedIdleTimerPage)
 
+// ── D13 步 3-4a：准备态「主图」弹层（方案 C，ADR-0008 D18）──────────────────
+describe('TimerPage 准备态主图弹层（ADR-0008 D18）', () => {
+  beforeEach(seedIdleTimerPage)
+  it('★ 选中非三级 → 按钮 disabled + aria-disabled + 提示；选中三级 → 可点', async () => {
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+      ],
+    }) as never)
+    const { rerender } = render(createElement(TimerPage))
+    // 种子默认 selectedWorkItemId = 'l2-x'（二级）→ 不可点
+    const button = await screen.findByTestId('launcher-view-map')
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByTestId('launcher-selected-title')).toHaveTextContent('已选：Ship feature')
+    expect(screen.getByTestId('launcher-view-map-hint')).toHaveTextContent('选择三级项后可查看主图')
+    // 切到三级项 → 可点、提示消失（store 更新触发页面重渲染 → 需包 act）
+    act(() => {
+      useTaskSpaceStore.setState({ selectedWorkItemId: 'l3-a' } as never)
+    })
+    rerender(createElement(TimerPage))
+    expect(screen.getByTestId('launcher-view-map')).toBeEnabled()
+    expect(screen.getByTestId('launcher-selected-title')).toHaveTextContent('已选：Verify output')
+    expect(screen.queryByTestId('launcher-view-map-hint')).toBeNull()
+  })
+  it('★ 懒读 + 弹层：**打开前不读**；点开才 readWorkMap(L3)、面板 role=dialog、内容=主图；Esc 关 + 焦点归还', async () => {
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+      ],
+    }) as never)
+    useTaskSpaceStore.setState({ selectedWorkItemId: 'l3-a' } as never)
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_ENDED)
+    render(createElement(TimerPage))
+    const button = await screen.findByTestId('launcher-view-map')
+    // 懒读：**没打开之前一次都不读**
+    expect(readWorkMapMock).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('map-preview-panel')).toBeNull()
+    button.focus()
+    fireEvent.click(button)
+    const panel = await screen.findByTestId('map-preview-panel')
+    expect(panel).toHaveAttribute('role', 'dialog')
+    expect(panel).toHaveAttribute('aria-modal', 'true')
+    expect(panel).toHaveAttribute('aria-label', '工作导图 · 主图')
+    await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
+    expect(await screen.findByTestId('map-overview-canvas')).toBeTruthy()
+    expect(screen.getByTestId('timer-map-overview')).toHaveTextContent('工作导图 · 主图')
+    // 只读：无编辑入口
+    expect(document.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByTestId('map-preview-panel')).toBeNull())
+    expect(document.activeElement).toBe(button) // 焦点归还触发按钮
+  })
+})
+describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
+  beforeEach(seedIdleTimerPage)
+  it('★ 启动成功后为选中的 L3 建岛（ADR-0008 S2：fire-and-forget，不阻断会话）', async () => {
+    // 在 l2-x 下补一个三级项，经「任务选择」Modal 勾进本次计划（②落地后的路径）
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-plan', depth: 3, parentId: 'l2-x', title: '卡点分析记录', displayKey: 'P-3', version: 1 },
+      ],
+    }) as never)
+    render(createElement(TimerPage))
+    fireEvent.click(await screen.findByTestId('launcher-browse-all'))
+    fireEvent.click(await screen.findByRole('checkbox', { name: '卡点分析记录' }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(screen.queryByTestId('task-picker-modal')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    await waitFor(() => expect(createLaunchSessionIslandsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: expect.any(String),
+        startedAt: expect.any(String),
+        level3WorkItemIds: ['l3-plan'],
+      }),
+    ))
+  })
+  it('★ ② 任务选择 Modal：勾三级 → 关闭 → 启动器摘要可见（无内联控件），CTA 载荷带计划', async () => {
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-plan', depth: 3, parentId: 'l2-x', title: '卡点分析记录', displayKey: 'P-3', version: 1 },
+      ],
+    }) as never)
+    render(createElement(TimerPage))
+    // 打开 Modal：含归属 select + 三级 checkbox + 筛选（外派单验收 1）
+    fireEvent.click(await screen.findByTestId('launcher-browse-all'))
+    expect(await screen.findByTestId('task-picker-modal')).toHaveAttribute('role', 'dialog')
+    expect(screen.getByLabelText('Level 2 attribution')).toBeInTheDocument()
+    expect(screen.getByLabelText('搜索工作项')).toBeInTheDocument()
+    expect(screen.getByLabelText('按状态筛选')).toBeInTheDocument()
+    // 勾三级 → 关闭
+    fireEvent.click(await screen.findByRole('checkbox', { name: '卡点分析记录' }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(screen.queryByTestId('task-picker-modal')).toBeNull())
+    // 启动器摘要可见；归属 select 不再内联在启动器里（外派单验收 3）
+    expect(screen.queryByLabelText('Level 2 attribution')).toBeNull()
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 1 项')
+    // 开始专注仍可达：载荷带归属与计划（外派单验收 5）
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    await waitFor(() => expect(coordinatorSpies.start).toHaveBeenCalledWith(
+      expect.objectContaining({ level2WorkItemId: 'l2-x', level3WorkItemIds: ['l3-plan'] }),
+    ))
+  })
+  it('★ 启动选择从 store 的 selectedWorkItemId 派生（行为断言，替代源码 grep）', async () => {
+    // 种子默认 selectedWorkItemId='l2-x'（二级）→ 派生：归属=自身、计划 0 项。
+    // 可观察面 = 启动器摘要（launcher-attribution-summary）—— 它不读源码、
+    // 只反映 deriveLaunchSelection(workItems, selectedWorkItemId) 的真实产物。
+    render(createElement(TimerPage))
+    expect(await screen.findByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 0 项')
+    // store 切到三级项 → 派生跟着变：归属=父二级（Ship feature）、该三级冻结进计划 1 项
+    act(() => {
+      useTaskSpaceStore.setState((current) => ({
+        workItems: [
+          ...current.workItems,
+          { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+        ],
+        selectedWorkItemId: 'l3-a',
+      }) as never)
+    })
+    expect(await screen.findByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 1 项')
+    // 同一派生源的第二个可观察面：Modal 内归属 select 的 value 同步为该二级项
+    fireEvent.click(screen.getByTestId('launcher-browse-all'))
+    expect(await screen.findByLabelText('Level 2 attribution')).toHaveValue('l2-x')
+  })
   it('默认 work 启动：载荷带 sessionType=work 与设置里的番茄时长', async () => {
     render(createElement(TimerPage))
 

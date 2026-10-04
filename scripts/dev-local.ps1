@@ -22,6 +22,11 @@ $ErrorActionPreference = 'Stop'
 $Root   = Split-Path -Parent $PSScriptRoot          # 仓库根
 $LogDir = Join-Path $Root '.run-logs'
 $Py     = Join-Path $Root 'backend\.venv\Scripts\python.exe'
+# ★ 2026-09-24：便携工具链（移动硬盘随行）——若 .portable\node* 存在则优先挂上，
+#   目标机无需预装 Node。见 scripts\portable\README.md。
+$PortableNode = Get-ChildItem (Join-Path $Root '.portable') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'node*' } | Select-Object -First 1
+if ($PortableNode) { $env:PATH = $PortableNode.FullName + ';' + $env:PATH }
 # ★ 2026-09-12：npm 改为解析式。原硬编码 'E:\WorkBuddyData\...\npm.cmd' 在本机不存在
 #   ⇒ start/restart 时前端直接起不来（Start-Process: 系统找不到指定的文件）。
 #   另注：必须落到 npm.cmd —— Start-Process 无法直接执行 PATH 上的 npm.ps1。

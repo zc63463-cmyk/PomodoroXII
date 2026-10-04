@@ -1,4 +1,5 @@
-import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, workItemCreateBusinessPayload, workItemPatchBusinessPayload, workItemReadSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItemNote, type WorkItemNoteDocument, type StatusCategoryValue, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
+import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, graphJsonPayloadSchema, workItemCreateBusinessPayload, workItemPatchBusinessPayload, workItemReadSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItemNote, type WorkItemNoteDocument, type StatusCategoryValue, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
+import type { GraphJsonPayload } from '@mindcanvas/kernel'
 import { buildCommandFields, hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
 import { spaceApi } from './api'
 
@@ -313,6 +314,22 @@ export const taskSpaceApi = {
   async listBlockedMap(_spaceId: string, projectId?: string): Promise<BlockedMap> {
     const response = await spaceApi.get('/relations/blocked-map', { params: { projectId } })
     return blockedMapSchema.parse(response.data)
+  },
+  /**
+   * 依赖域上图投影（ADR-0008 D19-b）：以工作项为锚的依赖闭包 → MindCanvas
+   * ``GraphJsonPayload``。只读派生端点；线格式为 snake_case（kernel 契约钉死），
+   * 故契约不走本文件的 camelCase 映射（``graphJsonPayloadSchema``）。
+   */
+  async getDependencyGraph(
+    _spaceId: string,
+    workItemId: string,
+    maxDepth?: number,
+  ): Promise<GraphJsonPayload> {
+    const response = await spaceApi.get('/relations/dependency-graph', {
+      params: { workItemId, ...(maxDepth !== undefined ? { maxDepth } : {}) },
+    })
+    // zod 线格式（snake_case）与 kernel GraphJsonPayload 结构同构，直传即可
+    return graphJsonPayloadSchema.parse(response.data)
   },
   async createRelation(input: CreateRelationInput) {
     return command(input.operationId, input.spaceId,

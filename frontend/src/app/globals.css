@@ -242,6 +242,11 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
   body {
     @apply bg-background text-foreground;
   }
@@ -965,14 +970,20 @@
     }
   }
 
-  /* 沉浸模式（页面级）：data-immersive 在运行态容器上，只渐隐被标记的
-     次级内容区（Workspace / Note / TodaySummary）—— 退出按钮与环不在其中，
-     所以"退出"永远可见可点。 */
-  .timer-immersive-region {
+  /* 沉浸模式（页面级）：data-immersive 在运行态容器上。渐隐对象 =
+     **显式标记 `.timer-immersive-fade` 的伴奏卡**（Workspace / Note / TodaySummary）——
+     退出按钮与环不在其中，所以"退出"永远可见可点。
+
+     ★ 2026-09-30 ADR-0008 D12：渐隐作用域从"整个右栏（.timer-immersive-region）"
+     下沉到显式标记的卡。原因：**父级 opacity 是子树合成效果，子元素无法"逆渐隐"**
+     —— 导图端口卡若留在被渐隐的子树内，"导图不随沉浸渐隐"在 CSS 层面不可实现，
+     且 `pointer-events: none` 会让"沉浸中仍能记录"彻底失效。
+     `.timer-immersive-region` 保留为结构标记（既有 testid 契约），不再承担渐隐。 */
+  .timer-immersive-fade {
     transition: opacity 300ms ease;
   }
 
-  [data-immersive='true'] .timer-immersive-region {
+  [data-immersive='true'] .timer-immersive-fade {
     opacity: 0.2;
     pointer-events: none;
   }
@@ -990,8 +1001,2262 @@
     }
 
     .timer-ring-progress,
-    .timer-immersive-region {
+    .timer-immersive-fade {
       transition: none;
     }
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   iOS 风格作用域（番茄钟页专用，2026-09-30）
+   ──────────────────────────────────────────────────────────────────────────
+   为什么是"作用域"而不是改全局令牌：iOS 观感（系统分组背景 / 白卡 / hairline /
+   SF 字体栈 / system blue）只用于番茄钟页，避免影响任务页、笔记页的既有视觉。
+   令牌前缀 --ios-* 与既有 --color-* 隔离；作用域内以本组为准。
+   ══════════════════════════════════════════════════════════════════════════ */
+.ios-scope {
+  /* iOS 令牌默认**映射项目主题变量** —— 本应用有 4 套主题
+     （.dark / .midnight / .nord / .daylight），硬编码 iOS 专属色必然在其中
+     某套下突兀。因此这里只保留「iOS 结构语言」（圆角 / hairline / 44px 触控 /
+     分组卡 / 分段控件，见下方各原语），色值一律继承项目主题。 */
+  --ios-bg: var(--background);
+  --ios-card: var(--card);
+  --ios-label: var(--foreground);
+  --ios-label-2: var(--muted-foreground);
+  --ios-label-3: color-mix(in oklab, var(--foreground) 35%, transparent);
+  --ios-sep: var(--border);
+  --ios-fill: color-mix(in oklab, var(--foreground) 8%, transparent);
+  /* iOS systemBlue：唯一保留的 iOS 专属色，仅用于可交互强调，不铺面积 */
+  --ios-blue: #007aff;
+  --ios-blue-soft: color-mix(in oklab, var(--ios-blue) 12%, transparent);
+  /* iOS systemGreen：完成态专用（PXII-FEAT-PLAN-CHECKOFF）。与 systemBlue 同理
+     —— 只承载"已完成"一种语义，不铺面积、不参与布局。 */
+  --ios-green: #34c759;
+  --ios-green-soft: color-mix(in oklab, var(--ios-green) 12%, transparent);
+
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
+  background: var(--ios-bg);
+  color: var(--ios-label);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* iOS 分组卡（inset grouped）：白底 + 圆角 */
+.ios-card {
+  background: var(--ios-card);
+  border-radius: 12px;
+  overflow: hidden;
+  /* 极细描边：让卡片边界在深浅两种主题下都清晰
+     （iOS 分组卡靠层次区分，但本项目 --card 与 --background 差距较小，补一层） */
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 9%, transparent);
+}
+
+/* iOS 胶囊 chip：用于"时长预设"这类**可变数量 + 中文标签**的选项组。
+   （不用标准 segmented control —— 它固定等分，中文标签 + 4~5 项在窄容器必溢出） */
+.ios-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 15px;
+  border: none;
+  border-radius: 999px;
+  background: var(--ios-fill);
+  color: var(--ios-label);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ios-chip:active {
+  opacity: 0.8;
+}
+.ios-chip[data-on='true'] {
+  background: var(--ios-blue);
+  color: #fff;
+}
+
+/* iOS 优先级标签（「七天内堆积」按优先级排布时显示）。
+   颜色用 color-mix 与前景色混合，保证深浅主题下都可读。 */
+.ios-prio {
+  font-size: 10.5px;
+  line-height: 1.6;
+  border-radius: 5px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.ios-prio[data-level='high'] {
+  background: color-mix(in oklab, #e24b4a 22%, transparent);
+  color: color-mix(in oklab, #e24b4a 70%, var(--foreground));
+}
+.ios-prio[data-level='mid'] {
+  background: color-mix(in oklab, #ef9f27 22%, transparent);
+  color: color-mix(in oklab, #ba7517 70%, var(--foreground));
+}
+.ios-prio[data-level='low'] {
+  background: var(--ios-fill);
+  color: var(--ios-label-2);
+}
+
+/* ── 导图三件套布局（ADR-0008 D15，2026-10-01 用户视觉评审后拆分）────────────
+   中央编辑区 = 看全 + 记录（沉浸时保留）；右栏小视图 = 缩略 + 定位（沉浸时极简岛）。
+   两个容器渲染**同一份树**（`.wm-tree`），差异只在容器宽度/高度。 */
+.wm-editor {
+  position: relative; /* 快速记录浮层的定位基准（浮层不撑开几何） */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  gap: 8px;
+}
+/* ── 头栏三段式（2026-10-03 真机回归：窄容器下标题被压成竖排 4 行）──────
+   旧实现：标题 / 计数 / tab 组 / 键位提示**同处一行**，靠 `margin-left:auto`
+   把键位提示推到最右。容器一窄，这条横排就挤不下 —— flex 逐项收缩，
+   标题里的汉字被逐字折行（每行 2 字），tab 组被裁切。
+   现在：**头栏本身是纵向三段**，段内各自成行且不换行：
+     ① 标题 + 计数  ② 视图切换（可横向滚动）  ③ 键位提示
+   `flex-shrink:0` 只在**段内**生效，不再让整条横排互相挤压。 */
+.wm-editor-hd {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ios-label-2);
+  flex-shrink: 0;
+}
+/* 段容器：标题行等 —— 内部横向排列，成员不换行不收缩 */
+.wm-editor-hd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+/* 标题：单行、永不折行（折行是本次回归的核心症状） */
+.wm-editor-title {
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-weight: 500;
+  color: var(--ios-label);
+}
+.wm-editor-count {
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+  border: 1px solid var(--ios-sep);
+  border-radius: 999px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+/* 横向滚动容器：子岛多时自己滚，不撑破父容器 */
+.scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  scrollbar-width: thin;
+}
+/* ── 键盘心流提示（PXII-FEAT-KEYMAP-FLOW）──────────────────────────────────
+   键位提示行与 `.wm-editor-hd` 同排：**只在可编辑（传了 onEdit）时渲染**。
+   文案与 `EDITOR_KEY_HINTS` 同源 —— 改键位必然改提示，不会分叉。 */
+.wm-editor-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+}
+.wm-key-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.wm-key-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 18%, transparent);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--ios-label-2);
+  background: color-mix(in oklab, var(--foreground) 4%, transparent);
+}
+.wm-editor-canvas {
+  position: relative;
+  flex: 1 1 0%; /* 自适应垂直铺满焦点区，与右栏高度对齐 */
+  min-height: 320px;
+  padding: 6px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--foreground) 3%, transparent);
+  overflow: hidden;
+}
+.wm-canvas-viewport {
+  width: 100%;
+  height: 100%;
+  transform-origin: center center;
+  will-change: transform;
+}
+/* 浮动画布缩放控制条（PXII-FEAT-ZOOM-PAN） */
+.wm-canvas-toolbar {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: color-mix(in oklab, var(--ios-card) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  padding: 3px 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  z-index: 10;
+  user-select: none;
+}
+.wm-canvas-tool-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--ios-label-2);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.wm-canvas-tool-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  color: var(--ios-label);
+}
+.wm-canvas-tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.wm-canvas-tool-btn--label {
+  font-size: 11px;
+  min-width: 38px;
+}
+/* ── 群岛流视口溢出指示（PXII-FEAT-ARCHIPELAGO-OVERFLOW）────────────────────
+   横向卡片流总宽超出视口时，左右边缘浮现渐变遮罩 + 垂直居中的毛玻璃翻页微按钮。
+   三层叠放次序：视口内容 < 渐变遮罩 < 翻页按钮（遮罩 `pointer-events: none`，
+   不挡画布拖拽；按钮才是可点目标）。到达边界时遮罩平滑淡出、按钮 `opacity: 0`
+   且 `pointer-events: none`（"隐退"而非位移，避免布局抖动）。 */
+.wm-archipelago-fade-mask {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  z-index: 8;
+}
+.wm-archipelago-fade-mask--left {
+  left: 0;
+  background: linear-gradient(to right, var(--background), transparent);
+}
+.wm-archipelago-fade-mask--right {
+  right: 0;
+  background: linear-gradient(to left, var(--background), transparent);
+}
+.wm-archipelago-fade-mask.is-visible {
+  opacity: 0.85;
+}
+.wm-archipelago-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  appearance: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--ios-label-2);
+  background: color-mix(in oklab, var(--ios-card) 80%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklab, var(--foreground) 14%, transparent);
+  border-radius: 50%;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  z-index: 9;
+  user-select: none;
+  transition: opacity 0.18s ease, background 0.15s ease, color 0.15s ease,
+    transform 0.15s ease;
+}
+.wm-archipelago-nav-btn--left {
+  left: 6px;
+}
+.wm-archipelago-nav-btn--right {
+  right: 6px;
+}
+.wm-archipelago-nav-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--ios-card) 96%, transparent);
+  color: var(--ios-label);
+}
+.wm-archipelago-nav-btn:active:not(:disabled) {
+  transform: translateY(-50%) scale(0.92);
+}
+/* 边界隐退：`opacity: 0` + 不可点（仍占位，故不会让相邻元素跳动） */
+.wm-archipelago-nav-btn:disabled {
+  opacity: 0;
+  pointer-events: none;
+}
+/* 子岛视图切换与聚焦横幅 */
+.wm-sub-island-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+  max-width: 100%;
+}
+.wm-sub-island-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in oklab, var(--ios-card) 90%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklab, var(--ios-blue) 40%, transparent);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 11px;
+  color: var(--ios-label);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  z-index: 10;
+}
+.wm-sub-island-banner strong {
+  color: var(--ios-blue);
+  font-weight: 600;
+}
+.wm-sub-island-exit-btn {
+  appearance: none;
+  background: color-mix(in oklab, var(--ios-blue) 12%, transparent);
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: var(--ios-blue);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.wm-sub-island-exit-btn:hover {
+  background: var(--ios-blue);
+  color: #fff;
+}
+/* 聚焦横幅里的**完成胶囊**（PXII-FEAT-PLAN-CHECKOFF）：与「退出子岛聚焦」
+   同排同尺寸 —— 两个胶囊并排时高度必须一致，否则横幅基线会歪。
+   未完成 = 中性描边（○ 标记完成）；已完成 = 淡绿实底（✓ 已完成）。 */
+.wm-sub-island-check-pill {
+  appearance: none;
+  background: transparent;
+  border: 1px solid color-mix(in oklab, var(--foreground) 20%, transparent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  color: var(--ios-label-2);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.wm-sub-island-check-pill:hover {
+  border-color: var(--ios-green);
+  color: var(--ios-green);
+}
+.wm-sub-island-check-pill--done {
+  background: var(--ios-green-soft);
+  border-color: color-mix(in oklab, var(--ios-green) 55%, transparent);
+  color: var(--ios-green);
+  font-weight: 600;
+}
+.wm-sub-island-check-pill--done:hover {
+  background: color-mix(in oklab, var(--ios-green) 20%, transparent);
+}
+.wm-editor-canvas--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--ios-label-2);
+}
+/* 画布焦点（键盘流的落点）：只描边、**不加 padding/不换 border-width** ——
+   任何盒尺寸变化都会让 SVG 的 viewBox 重算，出现"一聚焦树就抖一下"。
+   `:focus-visible` 限定只在键盘聚焦时出现（鼠标点选不留框）。 */
+.wm-editor-canvas:focus {
+  outline: none;
+}
+.wm-editor-canvas:focus-visible {
+  outline: 1.5px solid color-mix(in oklab, var(--ios-blue) 45%, transparent);
+  outline-offset: 1px;
+}
+/* 小视图画布（右栏）：矮高度 → 树自动缩到"可辨轮廓"尺寸 */
+.wm-port-canvas {
+  margin-top: 6px;
+  height: 132px;
+  padding: 4px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--foreground) 3%, transparent);
+  overflow: hidden;
+}
+
+/* 小视图标题栏的**模式微胶囊**（PXII-FEAT-PORT-FOCUS-SYNC）：
+   🎯 专注项 / 🌐 全景 两段切换。贴在「N 项」计数之后、右对齐 ——
+   标题行是 flex，`margin-left: auto` 把它推到最右，不与计数挤在一起。 */
+.wm-port-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding: 1px;
+  border-radius: 999px;
+  background: var(--ios-fill);
+}
+.wm-port-mode-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--ios-label-2);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.wm-port-mode-btn:hover {
+  color: var(--ios-label);
+}
+.wm-port-mode-btn--active {
+  background: var(--ios-card);
+  color: var(--ios-blue);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* ── 工作导图树渲染器（ADR-0008 D15：中央编辑区与右栏小视图**共用同一份**）────
+   同一 SVG + 随容器自适应的 viewBox → "小视图 vs 大编辑区"只是容器宽度不同，
+   没有第二套代码。极简态（[data-minimal='true']）只隐文字、不动几何。 */
+.wm-tree {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.wm-link {
+  fill: none;
+  stroke: color-mix(in oklab, var(--ios-blue) 38%, transparent);
+  stroke-width: 1.6;
+}
+.wm-box {
+  fill: var(--ios-card);
+  stroke: color-mix(in oklab, var(--foreground) 18%, transparent);
+  stroke-width: 1;
+}
+.wm-box--session {
+  fill: color-mix(in oklab, var(--ios-blue) 10%, var(--ios-card));
+  stroke: var(--ios-blue);
+  stroke-width: 1.6;
+}
+.wm-text {
+  fill: var(--ios-label);
+  font-family: inherit;
+}
+.wm-shape--plain {
+  fill: color-mix(in oklab, var(--ios-blue) 55%, transparent);
+}
+.wm-shape--insight {
+  fill: #0c8599;
+}
+.wm-shape--problem {
+  fill: #d85a30;
+}
+.wm-shape--decision {
+  fill: #534ab7;
+}
+.wm-shape--review {
+  fill: none;
+  stroke: #2f9e44;
+  stroke-width: 1.6;
+}
+.wm-shape--todo {
+  fill: none;
+  stroke: #d97706;
+  stroke-width: 1.6;
+}
+[data-minimal='true'] .wm-text {
+  visibility: hidden;
+}
+
+/* ── 快速记录（ADR-0008 D13 步 2 → D15 迁移至**中央编辑区**）──────────────────
+   形状/颜色的**节点侧**编码在 `.wm-shape--*`（SVG）；这里只管按钮行与浮层输入。 */
+.ios-map-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+  flex-shrink: 0;
+}
+.ios-map-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ios-map-quick-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ios-map-quick-btn[aria-pressed='true'] {
+  border-color: var(--ios-blue);
+  color: var(--ios-blue);
+  background: var(--ios-blue-soft);
+}
+/* 每类押上自己的强调色（与节点形状同源） */
+.ios-map-quick-btn[data-thought='insight'] {
+  border-color: color-mix(in oklab, #0c8599 45%, transparent);
+  color: color-mix(in oklab, #0c8599 80%, var(--foreground));
+}
+.ios-map-quick-btn[data-thought='problem'] {
+  border-color: color-mix(in oklab, #d85a30 45%, transparent);
+  color: color-mix(in oklab, #d85a30 80%, var(--foreground));
+}
+.ios-map-quick-btn[data-thought='decision'] {
+  border-color: color-mix(in oklab, #534ab7 45%, transparent);
+  color: color-mix(in oklab, #534ab7 80%, var(--foreground));
+}
+.ios-map-quick-btn[data-thought='review'] {
+  border-color: color-mix(in oklab, #2f9e44 45%, transparent);
+  color: color-mix(in oklab, #2f9e44 80%, var(--foreground));
+}
+.ios-map-quick-btn[data-thought='todo'] {
+  border-color: color-mix(in oklab, #d97706 45%, transparent);
+  color: color-mix(in oklab, #d97706 80%, var(--foreground));
+}
+/* 浮层输入：绝对定位悬浮在岛卡上方 —— 展开/收起**不撑开容器**（零布局抖动的延伸） */
+.ios-map-quick-pop {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 46px;
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--ios-card);
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.28);
+  z-index: 2;
+}
+.ios-map-quick-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  font-family: inherit;
+  background: var(--ios-bg);
+  color: var(--ios-label);
+}
+.ios-map-quick-submit {
+  flex: none;
+  border: none;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--ios-blue);
+  color: #fff;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ios-map-quick-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ios-map-quick-cancel {
+  flex: none;
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.ios-map-quick-cancel:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+.ios-map-quick-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── 节点编辑（ADR-0008 D16 / D13 步 3-2）：选中环 · 操作行 · 浮层 · 注释 ─────
+   可编辑节点（有 cid）才可点；只读节点不给指针样式、hover 靠 SVG <title> 提示。 */
+.wm-node[data-cid] {
+  cursor: pointer;
+}
+.wm-box--selected {
+  stroke: var(--ios-blue);
+  stroke-width: 2;
+  fill: color-mix(in oklab, var(--ios-blue) 14%, var(--ios-card));
+}
+/* ── 当前专注计划项（方案 A）：高亮标识正在专注的三级计划项 ─────────────────── */
+.wm-node--current-plan .wm-box {
+  stroke: var(--ios-blue);
+  stroke-width: 1.8;
+  fill: color-mix(in oklab, var(--ios-blue) 6%, var(--ios-card, #ffffff));
+}
+.wm-node--current-plan .wm-text {
+  font-weight: 600;
+  fill: var(--ios-blue);
+}
+/* ── 节点定位（ADR-0008 D15）：小视图点击定位 → 中央高亮环 ──────────────────
+   由 focusCid 驱动，与 wm-node--selected（编辑选中）区分；沉浸极简态常驻可见。 */
+.wm-node--focus .wm-box {
+  stroke: #d97706;
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 3px color-mix(in oklab, #d97706 45%, transparent));
+}
+.wm-node--selected.wm-node--focus .wm-box {
+  stroke: #d97706;
+  stroke-width: 2.4;
+}
+.wm-comment-dot {
+  fill: #d97706;
+}
+/* ── 幕布描述块（PXII-FEAT-DESC-BLOCK）：节点盒内的引用块 ────────────────────
+   左引用细竖线 + 缩进小灰字，对齐 MindCanvas `DescBlock` 的视觉层级
+   （节点本体 = 正文，描述 = 弱化一档）。几何由 `descBlockGeometry` 给定，
+   这里只管配色 —— 颜色全部走主题变量，浅色/深色主题下都清晰可辨。 */
+.wm-desc-bar {
+  stroke: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.wm-desc-text {
+  fill: var(--muted-foreground);
+  /* 描述是弱化层，不参与标题的字重 */
+  font-weight: 400;
+}
+/* 选中态：引用竖线与描述文字随主边框（--ios-blue）微调提亮 */
+.wm-node--selected .wm-desc-bar {
+  stroke: color-mix(in srgb, var(--ios-blue) 55%, transparent);
+}
+.wm-node--selected .wm-desc-text {
+  fill: color-mix(in srgb, var(--ios-blue) 35%, var(--muted-foreground));
+}
+/* 定位态（focusCid）：与 #d97706 环同色系 */
+.wm-node--focus .wm-desc-bar {
+  stroke: color-mix(in srgb, #d97706 55%, transparent);
+}
+/* 极简岛（沉浸）：与 .wm-text 同一条纪律 —— 只隐文字，几何不变（零布局抖动） */
+[data-minimal='true'] .wm-desc-text {
+  visibility: hidden;
+}
+/* ── 任务空间幕布描述块（PXII-FEAT-TASK-SPACE-P0 P0-3）─────────────────────
+   HTML 侧的 DescBlock 同构呈现（WorkItemDetail 的只读描述）：左 2px 竖线 +
+   缩进弱化多行文本。配色口径与上方 SVG 版一致（25% 前景竖线 + muted 文字），
+   选择器统一收在 .wm-desc-container 作用域下 —— 不与 SVG 侧的 stroke/fill
+   规则互相串扰。多行用 white-space: pre-wrap 保序（升格时注释按 \n join）。 */
+.wm-desc-container {
+  display: flex;
+  gap: 10px;
+}
+.wm-desc-container .wm-desc-bar {
+  flex: none;
+  width: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.wm-desc-container .wm-desc-text {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.wm-action-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-action-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wm-action-btn--danger {
+  border-color: color-mix(in oklab, #e24b4a 45%, transparent);
+  color: color-mix(in oklab, #e24b4a 80%, var(--foreground));
+}
+.wm-node-comment {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+/* 浮层：与快速记录同一套绝对定位（展开/收起不撑开几何） */
+.wm-action-pop {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 46px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--ios-card);
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.28);
+  z-index: 2;
+}
+.wm-action-input {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  font-family: inherit;
+  background: var(--ios-bg);
+  color: var(--ios-label);
+  resize: vertical;
+}
+.wm-action-submit {
+  flex: none;
+  min-height: 30px;
+  border: none;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--ios-blue);
+  color: #fff;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-action-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wm-action-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-action-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* 类型 chip 押上各类强调色（与节点形状/快速记录同源） */
+.wm-action-chip[data-thought='insight'] {
+  border-color: color-mix(in oklab, #0c8599 45%, transparent);
+  color: color-mix(in oklab, #0c8599 80%, var(--foreground));
+}
+.wm-action-chip[data-thought='problem'] {
+  border-color: color-mix(in oklab, #d85a30 45%, transparent);
+  color: color-mix(in oklab, #d85a30 80%, var(--foreground));
+}
+.wm-action-chip[data-thought='decision'] {
+  border-color: color-mix(in oklab, #534ab7 45%, transparent);
+  color: color-mix(in oklab, #534ab7 80%, var(--foreground));
+}
+.wm-action-chip[data-thought='review'] {
+  border-color: color-mix(in oklab, #2f9e44 45%, transparent);
+  color: color-mix(in oklab, #2f9e44 80%, var(--foreground));
+}
+.wm-action-chip[data-thought='todo'] {
+  border-color: color-mix(in oklab, #d97706 45%, transparent);
+  color: color-mix(in oklab, #d97706 80%, var(--foreground));
+}
+
+/* ── 结束态岛总览 + 类型图例 + 跨岛筛选（ADR-0008 D13 步 3-4b / D17）──────────
+   总览只读；筛选**dim 不 hide**（隐藏会拆断树结构 → 只调视觉权重）。 */
+.wm-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+.wm-overview-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ios-label-2);
+}
+.wm-overview-canvas {
+  min-height: 220px;
+  padding: 6px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--foreground) 3%, transparent);
+  overflow: hidden;
+}
+.wm-overview-canvas--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--ios-label-2);
+}
+.wm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wm-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-legend-item[aria-pressed='true'] {
+  border-color: var(--ios-blue);
+  color: var(--ios-blue);
+  background: var(--ios-blue-soft);
+}
+.wm-legend-shape {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.wm-legend-label {
+  white-space: nowrap;
+}
+.wm-legend-count {
+  min-width: 12px;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+}
+/* 命中 = 满 opacity + 描边环；其余 dim 0.28（**不隐藏**，D17） */
+.wm-node--dim {
+  opacity: 0.28;
+}
+.wm-node--hl .wm-box {
+  stroke: var(--ios-blue);
+  stroke-width: 2;
+}
+.wm-link--dim {
+  opacity: 0.28;
+}
+
+/* ── 近 N 展开 + 历史归档岛（ADR-0008 D19-a：纯视图层投影切片）──────────────
+   顶部控制栏 = 图例（左）+ [近 5 岛 | 全部展开] 分段切换（右）；
+   归档岛是虚拟卡片（虚线描边），点击等同「全部展开」。 */
+.wm-overview-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.wm-view-toggle {
+  display: inline-flex;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.wm-view-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1.6;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wm-view-btn + .wm-view-btn {
+  border-left: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+}
+.wm-view-btn[aria-pressed='true'] {
+  background: var(--ios-blue);
+  color: #fff;
+}
+/* tab 标题：单行省略。宽度由 flex 分配（min-width:0 才能真正收缩）——
+   JS 硬截断会在最易歧义的字尾处砍断（如「导图实测改名实验」→「…改名实…」）。 */
+.wm-view-btn-label {
+  display: inline-block;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+/* 归档岛卡片：虚线描边 + 浅底 —— 纯投影切片，与真实岛（实线）区分 */
+.wm-island--archive .wm-box {
+  fill: color-mix(in oklab, var(--ios-fill) 60%, var(--ios-card));
+  stroke: color-mix(in oklab, var(--foreground) 38%, transparent);
+  stroke-width: 1.2;
+  stroke-dasharray: 5 3;
+}
+.wm-island--archive .wm-archive-title {
+  fill: var(--ios-label);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.wm-island--archive .wm-archive-sub {
+  fill: var(--ios-label-2);
+  font-size: 10.5px;
+}
+.wm-island--archive[role='button'] {
+  cursor: pointer;
+}
+.wm-island--archive[role='button']:hover .wm-box,
+.wm-island--archive[role='button']:focus-visible .wm-box {
+  stroke: var(--ios-blue);
+}
+.wm-island--archive[role='button']:focus-visible {
+  outline: none;
+}
+
+/* ── 依赖状态徽章（ADR-0008 D19-b 双轨制 · 紧凑态）──────────────────────────
+   自持树不跑贝塞尔避让：依赖用节点旁 Badge 表达（红 ⚡N = 有未完成上游，
+   绿 ✓ = 上游全部完成）；完整自由边语义保留在 root.note.edges（导出侧）。 */
+.wm-dep-badge rect {
+  stroke-width: 1;
+}
+.wm-dep-badge--blocked rect {
+  fill: color-mix(in oklab, #e24b4a 18%, var(--ios-card));
+  stroke: #e24b4a;
+}
+.wm-dep-badge--blocked text {
+  fill: #d85a30;
+  font-size: 10px;
+  font-weight: 600;
+}
+.wm-dep-badge--ok rect {
+  fill: color-mix(in oklab, #2f9e44 14%, var(--ios-card));
+  stroke: #2f9e44;
+}
+.wm-dep-badge--ok text {
+  fill: #2f9e44;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* ── 岛地标卡 + 聚焦（S4-3，D19-c：纯自持增强，不引 @mindcanvas/react）──────
+   对齐 MindCanvas IO-UX 规范：会话岛外包实底圆角卡（柔和投影）+ 左侧色条
+   （当前会话 systemBlue / 历史中性灰）+ 右上胶囊角标（N 项思考 + 思考点阵）；
+   聚焦时非聚焦岛纯 CSS opacity 0.15（DOM 结构不动）。 */
+.wm-island-frame {
+  fill: var(--ios-card);
+  stroke: color-mix(in oklab, var(--foreground) 14%, transparent);
+  stroke-width: 1;
+  filter: drop-shadow(0 1px 3px color-mix(in oklab, var(--foreground) 12%, transparent));
+}
+.wm-island-card--current .wm-island-frame {
+  stroke: color-mix(in oklab, var(--ios-blue) 55%, transparent);
+}
+.wm-island-bar {
+  fill: color-mix(in oklab, var(--foreground) 26%, transparent);
+}
+.wm-island-card--current .wm-island-bar {
+  fill: var(--ios-blue);
+}
+/* ── 顶栏会话标题（PXII-FEAT-SESSION-HUB）──────────────────────────────────
+   会话标题从画布节点**上浮**到地标卡顶栏左侧（红框位）—— 它是会话标题的唯一
+   完整展示位（画布内岛根已收拢为发端枢纽，不再承载文本）。
+   当前会话 = systemBlue 高亮，历史会话 = 柔和灰（与左色条同一套颜色语义）。
+   字号由渲染层 `fontSize` 给定（ISLAND_TITLE_FONT_SIZE，与截断尺子同源）。 */
+.wm-island-title {
+  fill: color-mix(in oklab, var(--foreground) 45%, transparent);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+.wm-island-card--current .wm-island-title {
+  fill: var(--ios-blue);
+}
+/* ── 会话发端枢纽（Anchor Hub，PXII-FEAT-SESSION-HUB）──────────────────────
+   会话岛根的紧凑形态：外圆环 + 中心亮点（替代原先 ~150px 宽、常被截断的
+   会话节点矩形卡）。当前会话 = systemBlue 呼吸环，历史会话 = 中性灰。
+   几何（盒 28×28）由 `SESSION_HUB_SIZE` 度量给定，这里只管描边/填充。 */
+.wm-box--session-hub {
+  cursor: default;
+}
+.wm-node[data-cid] .wm-box--session-hub {
+  cursor: pointer;
+}
+.wm-hub-ring {
+  fill: color-mix(in oklab, var(--ios-card) 88%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 38%, transparent);
+  stroke-width: 1.6;
+}
+.wm-hub-core {
+  fill: color-mix(in oklab, var(--foreground) 42%, transparent);
+}
+/* 当前会话：蓝环 + 蓝芯 + 呼吸（与计时环同一套「进行中」语言） */
+.wm-box--session-hub[data-hub-current='true'] .wm-hub-ring {
+  stroke: var(--ios-blue);
+  stroke-width: 2;
+}
+.wm-box--session-hub[data-hub-current='true'] .wm-hub-core {
+  fill: var(--ios-blue);
+  animation: wm-hub-breathe 2.8s ease-in-out infinite;
+}
+@keyframes wm-hub-breathe {
+  0%,
+  100% {
+    opacity: 0.82;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+/* 定位环（focusCid）：枢纽随 .wm-node--focus 提亮，与矩形节点同语义 */
+.wm-node--focus .wm-hub-ring {
+  stroke: #d97706;
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 3px color-mix(in oklab, #d97706 45%, transparent));
+}
+/* 呼吸环在偏好减少动态下冻结（与计时环同一纪律） */
+@media (prefers-reduced-motion: reduce) {
+  .wm-box--session-hub[data-hub-current='true'] .wm-hub-core {
+    animation: none;
+  }
+}
+.wm-island-badge {
+  cursor: default;
+}
+.wm-island-badge[role='button'] {
+  cursor: pointer;
+}
+.wm-island-badge rect {
+  fill: color-mix(in oklab, var(--ios-blue) 12%, transparent);
+  stroke: color-mix(in oklab, var(--ios-blue) 25%, transparent);
+  stroke-width: 1;
+}
+.wm-island-badge text {
+  fill: var(--ios-label-2);
+  font-size: 10px;
+}
+.wm-island-badge[role='button']:hover rect,
+.wm-island-badge[role='button']:focus-visible rect {
+  fill: color-mix(in oklab, var(--ios-blue) 22%, transparent);
+}
+.wm-island-badge[role='button']:focus-visible {
+  outline: none;
+}
+/* 聚焦态：非聚焦岛压暗（不隐藏 —— 树结构不破坏，同 D17 dim 纪律） */
+.wm-island--dimmed {
+  opacity: 0.15;
+}
+/* 聚焦控制栏：[ ← 退出聚焦 ] 正在查看：会话 X */
+.wm-focus-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.wm-focus-exit {
+  border: 1px solid var(--ios-blue);
+  border-radius: 8px;
+  color: var(--ios-blue);
+}
+.wm-focus-label {
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+  white-space: nowrap;
+}
+
+/* ── 嵌套子岛地标卡（PXII-FEAT-NESTED-ISLAND）────────────────────────────
+   会话岛内的 L3 任务分支嵌套卡：半透明圆角虚线边框 + 顶部微标签。
+   当前专注项亮蓝色，子岛聚焦时高亮并 dim 其余子岛。 */
+.wm-sub-island-card {
+  transition: opacity 0.2s;
+}
+.wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--foreground) 2.5%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 12%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  transition: fill 0.2s, stroke 0.2s;
+}
+.wm-sub-island-card:hover .wm-sub-island-frame {
+  stroke: color-mix(in oklab, var(--ios-blue) 45%, transparent);
+}
+.wm-sub-island-card--current .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-blue) 3.5%, transparent);
+  stroke: color-mix(in oklab, var(--ios-blue) 45%, transparent);
+  stroke-dasharray: none;
+}
+.wm-sub-island-card--focused .wm-sub-island-frame {
+  fill: var(--ios-card);
+  stroke: var(--ios-blue);
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+  filter: drop-shadow(0 4px 16px color-mix(in oklab, var(--ios-blue) 18%, transparent));
+}
+.wm-sub-island-bar {
+  fill: var(--ios-blue);
+}
+
+/* ── 一键完成（PXII-FEAT-PLAN-CHECKOFF）────────────────────────────────────
+   打勾按钮 / 已完成绿意 / 已完成胶囊角标。
+   ★ 完成态只调**视觉权重**：卡内思考分支与连线依然 100% 完整可见（复盘信息不丢），
+     故这里没有任何 display/opacity 裁切，只有配色派生。 */
+.wm-sub-island-check {
+  cursor: pointer;
+  user-select: none;
+}
+.wm-sub-island-check-bg {
+  fill: color-mix(in oklab, var(--ios-card) 88%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 26%, transparent);
+  stroke-width: 1.2;
+  transition: fill 0.15s, stroke 0.15s;
+}
+.wm-sub-island-check:hover .wm-sub-island-check-bg,
+.wm-sub-island-check:focus-visible .wm-sub-island-check-bg {
+  stroke: var(--ios-green);
+  fill: var(--ios-green-soft);
+}
+.wm-sub-island-check-mark {
+  fill: var(--ios-label-3);
+  transition: fill 0.15s;
+}
+.wm-sub-island-check:hover .wm-sub-island-check-mark {
+  fill: var(--ios-green);
+}
+.wm-sub-island-check--done .wm-sub-island-check-bg {
+  fill: var(--ios-green-soft);
+  stroke: var(--ios-green);
+}
+.wm-sub-island-check--done .wm-sub-island-check-mark {
+  fill: var(--ios-green);
+}
+/* 已完成卡片：左色条转柔和绿 + 卡片底/描边极轻绿意（信息不裁切） */
+.wm-sub-island-card--completed .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-green) 3%, transparent);
+  stroke: color-mix(in oklab, var(--ios-green) 38%, transparent);
+}
+.wm-sub-island-card--completed .wm-sub-island-bar {
+  fill: var(--ios-green);
+}
+/* 已完成卡片与「专注中」同现时：专注蓝仍是主色条（用户当下正在看它），
+   绿意退到描边 —— 避免两种强调色在同一条 4px 色条上打架。 */
+.wm-sub-island-card--completed.wm-sub-island-card--current .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-blue) 3.5%, transparent);
+  stroke: color-mix(in oklab, var(--ios-green) 45%, transparent);
+}
+.wm-sub-island-card--completed.wm-sub-island-card--current .wm-sub-island-bar {
+  fill: var(--ios-blue);
+}
+/* 已完成角标：淡绿实底对勾胶囊 */
+.wm-sub-island-card--completed .wm-sub-island-tag-bg {
+  fill: var(--ios-green-soft);
+  stroke: var(--ios-green);
+}
+.wm-sub-island-card--completed .wm-sub-island-tag-text {
+  fill: var(--ios-green);
+  font-weight: 600;
+}
+/* 子岛根节点的轻微完成绿意（分支与连线不动） */
+.wm-node--plan-completed .wm-box--plan-completed {
+  fill: color-mix(in oklab, var(--ios-green) 5%, var(--ios-card));
+  stroke: color-mix(in oklab, var(--ios-green) 42%, transparent);
+}
+.wm-sub-island-title {
+  fill: var(--ios-label);
+  letter-spacing: -0.2px;
+  user-select: none;
+}
+.wm-sub-island-card--dimmed {
+  opacity: 0.18;
+}
+.wm-sub-island-tag-wrap {
+  cursor: pointer;
+}
+.wm-sub-island-tag-bg {
+  fill: color-mix(in oklab, var(--ios-card) 92%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 15%, transparent);
+  stroke-width: 0.8;
+  transition: fill 0.15s, stroke 0.15s;
+}
+.wm-sub-island-card--current .wm-sub-island-tag-bg {
+  fill: color-mix(in oklab, var(--ios-blue) 12%, var(--ios-card));
+  stroke: var(--ios-blue);
+}
+.wm-sub-island-card--focused .wm-sub-island-tag-bg {
+  fill: var(--ios-blue);
+  stroke: var(--ios-blue);
+}
+.wm-sub-island-tag-text {
+  fill: var(--ios-label-2);
+  font-weight: 500;
+  letter-spacing: -0.2px;
+  user-select: none;
+}
+.wm-sub-island-card--current .wm-sub-island-tag-text {
+  fill: var(--ios-blue);
+  font-weight: 600;
+}
+.wm-sub-island-card--focused .wm-sub-island-tag-text {
+  fill: #fff;
+  font-weight: 600;
+}
+.wm-sub-island-exit-pill {
+  cursor: pointer;
+}
+.wm-sub-island-exit-bg {
+  fill: color-mix(in oklab, var(--ios-blue) 10%, transparent);
+  stroke: color-mix(in oklab, var(--ios-blue) 30%, transparent);
+  stroke-width: 1;
+  transition: fill 0.15s;
+}
+.wm-sub-island-exit-pill:hover .wm-sub-island-exit-bg,
+.wm-sub-island-exit-pill:focus-visible .wm-sub-island-exit-bg {
+  fill: color-mix(in oklab, var(--ios-blue) 22%, transparent);
+}
+.wm-sub-island-exit-text {
+  fill: var(--ios-blue);
+  user-select: none;
+}
+.wm-sub-island-hint {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
+.wm-sub-island-hint:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+/* ── 准备态「主图」弹层（ADR-0008 D18 / D13 步 3-4a，方案 C）──────────────────
+   触发行在三栏之下；弹层内容**复用** `.wm-overview`（图例 + 全岛树 + 筛选），
+   这里只管壳（backdrop / 面板 / 关闭）与触发行。 */
+.wm-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wm-preview-open {
+  flex: none;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-preview-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wm-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgb(0 0 0 / 0.42);
+}
+.wm-preview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(1080px, 92vw);
+  max-height: 86vh;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 14px;
+  background: var(--ios-card, var(--card));
+  box-shadow: 0 24px 64px -24px rgb(0 0 0 / 0.5);
+  overflow: auto;
+  outline: none;
+}
+.wm-preview-bar {
+  display: flex;
+  justify-content: flex-end;
+}
+.wm-preview-close {
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-preview-loading {
+  padding: 24px 4px;
+}
+/* 弹层里的总览占满可用高度（面板 max-height 86vh 由内容自适应） */
+.wm-preview-panel .wm-overview {
+  min-height: 0;
+}
+.wm-preview-panel .wm-overview-canvas {
+  min-height: 320px;
+}
+
+/* 分组标题（iOS grouped header）：小字、次级色、左缩进 */
+.ios-card-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px 6px;
+  font-size: 13px;
+  color: var(--ios-label-2);
+}
+
+/* iOS 单元格（cell）：左标题 / 右侧值；hairline 分隔画在相邻行之间 */
+.ios-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 16px;
+  min-height: 44px; /* iOS 最小可点高度 */
+}
+.ios-row + .ios-row::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  right: 0;
+  top: 0;
+  border-top: 0.5px solid var(--ios-sep); /* hairline */
+}
+.ios-row[data-tappable='true'] {
+  cursor: pointer;
+}
+.ios-row[data-tappable='true']:active {
+  background: var(--ios-fill);
+}
+.ios-row[data-selected='true'] {
+  background: var(--ios-blue-soft);
+}
+
+/* iOS 单选圆点（用于"继续上次"的选中态） */
+.ios-radio {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ios-label-3);
+  flex: none;
+  position: relative;
+}
+.ios-row[data-selected='true'] .ios-radio {
+  border-color: var(--ios-blue);
+}
+.ios-row[data-selected='true'] .ios-radio::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--ios-blue);
+}
+
+/* iOS 主按钮（filled）：systemBlue + 圆角 + 44px 高 */
+.ios-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 22px;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-family: inherit;
+  background: var(--ios-blue);
+  color: #fff;
+  cursor: pointer;
+}
+.ios-btn:active {
+  opacity: 0.85;
+}
+.ios-btn--plain {
+  background: transparent;
+  color: var(--ios-blue);
+  min-height: 38px;
+  padding: 0 12px;
+  font-size: 15px;
+}
+.ios-btn--gray {
+  background: var(--ios-fill);
+  color: var(--ios-label);
+}
+
+/* iOS 分段控件（segmented control）：选择时长用 */
+.ios-seg {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--ios-fill);
+  gap: 2px;
+}
+.ios-seg-item {
+  padding: 6px 15px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--ios-label);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ios-seg-item[data-on='true'] {
+  background: var(--ios-card);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--foreground) 14%, transparent);
+  font-weight: 500;
+}
+
+/* 两栏骨架：宽屏 = 左焦点 + 右伴奏；窄屏单列（右栏落到下方）。
+   断点取 780px —— 因为本应用有 ~240px 宽的左侧全局边栏，**实际内容区宽度
+   ≈ 视口 − 240**：用户在 1080px 视口下内容区仅 ~840px，若断点按视口取 1180
+   则永远进单列、两栏形同不存在（实测踩过）。780 对应视口 ≈1020，覆盖常见笔记本。 */
+.timer-frame-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) var(--timer-side-w, 336px);
+}
+
+@media (max-width: 780px) {
+  .timer-frame-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* iOS 深色主题：**只调 iOS 蓝** —— 其余令牌已映射项目主题变量，自动跟随。
+   （浅色 #007aff 在深底下对比不足，iOS 自己在 dark 下也用 #0a84ff） */
+.dark .ios-scope,
+.midnight .ios-scope,
+.nord .ios-scope {
+  --ios-blue: #0a84ff;
+  /* 深色下 systemGreen 提亮一档（浅色 #34c759 在深底上偏暗、与蓝色强调失衡） */
+  --ios-green: #30d158;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   番茄钟 · 设计稿对齐层（2026-09-30 第二轮："完全复刻"）
+   ──────────────────────────────────────────────────────────────────────────
+   设计稿 `设计稿-番茄钟页面UI优化.html` 用的是**固定色值**（#fcfcfb / #343434 /
+   #ebebeb …）；本项目有 4 套主题（.dark/.midnight/.nord/.daylight），硬抄会把
+   深色主题页刷成白底。因此这里**只复刻结构与度量**（列数/间距/圆角/字号/行高/
+   hairline 位置），**颜色一律映射 --ios-* 令牌**，由主题决定具体色值。
+
+   对应关系（设计稿 class → 本项目 class）：
+     .groups/.gh/.quick/.qrow   → .ios-groups/.ios-group-hd/.ios-quick/.ios-qrow
+     .side/.hd/.bd              → .ios-side/.ios-side-hd/.ios-side-bd
+     .card/.ct                  → .ios-card/.ios-card-title
+     .stats/.stat/.n/.l         → .ios-stats/.ios-stat/.ios-stat-n/.ios-stat-l
+     .row/.dot/.tail            → .ios-drow/.ios-dot/.ios-tail
+     .tiny                      → .ios-tiny
+     .crumb/.k                  → .ios-crumb/.ios-crumb-k
+     .durations/.dur            → .ios-chip（已有）
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 右栏（伴奏）底色：设计稿 #fcfcfb 比主背景略亮/略灰，用于把"栏"与"卡"分开。
+   用 color-mix 与背景混合，深浅主题都成立。 */
+.ios-side {
+  background: color-mix(in oklab, var(--ios-card) 88%, var(--ios-bg));
+}
+.ios-side-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 13px 16px 11px;
+  border-bottom: 0.5px solid var(--ios-sep);
+}
+.ios-side-hd .t {
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  color: var(--ios-label-2);
+}
+.ios-side-bd {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+}
+
+/* 右栏卡片（设计稿 .card，比 .ios-card 更轻：带描边、无阴影 inset） */
+.ios-panel {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 11px;
+  background: var(--ios-card);
+  padding: 13px 14px;
+}
+.ios-card-title {
+  margin-bottom: 9px;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+
+/* 右栏"数据行"（设计稿 .row）：圆点 + 文案 + 右侧尾标 */
+.ios-drow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+.ios-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ios-label-3);
+}
+.ios-dot--strong {
+  background: var(--ios-label);
+}
+.ios-tail {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+  white-space: nowrap;
+}
+
+/* 右栏统计三格（设计稿 .stats/.stat） */
+.ios-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+.ios-stat {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  padding: 9px 10px;
+}
+.ios-stat-n {
+  font-size: 18px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.ios-stat-n small {
+  font-size: 11px;
+  color: var(--ios-label-2);
+}
+.ios-stat-l {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--ios-label-2);
+}
+
+/* 说明性小字（设计稿 .tiny） */
+.ios-tiny {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--ios-label-2);
+}
+
+/* 顶部面包屑（设计稿 .crumb） */
+.ios-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ios-label-2);
+}
+.ios-crumb-k {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: var(--ios-fill);
+  color: var(--ios-label-2);
+}
+
+/* ── 「继续上次」三栏（设计稿 .groups）─────────────────────────────────────
+   设计稿是 **固定三列** repeat(3, minmax(0,1fr))（用户明确"三组竖着排开=每组
+   一列，三列并排"）。窄容器（<720px）折成单列。 */
+.ios-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 13px;
+}
+@media (max-width: 720px) {
+  .ios-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ios-group-hd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 7px;
+  padding: 0 1px;
+}
+.ios-group-hd .r1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+.ios-group-hd .cnt {
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  background: var(--ios-fill);
+  color: var(--ios-label-2);
+}
+.ios-group-hd .sort {
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+}
+
+/* 列表卡（设计稿 .quick）：列内竖向，行间 hairline 由 .ios-qrow 承担 */
+.ios-quick {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 11px;
+  background: var(--ios-card);
+  overflow: hidden;
+}
+
+/* 两行紧凑行（设计稿 .qrow）：比 .ios-row(44px) 更密，专为窄列设计 */
+.ios-qrow {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 11px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  color: inherit;
+}
+.ios-qrow + .ios-qrow::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  right: 0;
+  top: 0;
+  border-top: 0.5px solid var(--ios-sep);
+}
+.ios-qrow[data-tappable='true'] {
+  cursor: pointer;
+}
+.ios-qrow[data-tappable='true']:active {
+  background: var(--ios-fill);
+}
+.ios-qrow[data-selected='true'] {
+  background: var(--ios-blue-soft);
+}
+.ios-qrow .qbody {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.ios-qrow .qt {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ios-qrow .qmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ios-label-2);
+  white-space: nowrap;
+}
+/* 空层占位行：不假装有数据，但保留三栏结构（有意偏离设计稿"空层隐藏"） */
+.ios-qrow .qempty {
+  font-size: 12px;
+  color: var(--ios-label-3);
+}
+
+/* 小号单选圈（设计稿 .rd 为 13px；.ios-radio 是 20px 的 iOS 标准） */
+.ios-radio[data-size='sm'] {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border-width: 1.5px;
+}
+.ios-qrow[data-selected='true'] .ios-radio {
+  border-color: var(--ios-blue);
+}
+.ios-qrow[data-selected='true'] .ios-radio::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--ios-blue);
+}
+
+/* iOS「行内选择器」（二级归属）—— 原生 <select> 套一层 iOS 外观。
+   保留原生控件：它的键盘/无障碍语义是既有测试（`toBeRequired`）与真实可用性
+   的依托，不换自定义列表。 */
+.ios-select {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 13px;
+}
+.ios-select:disabled {
+  opacity: 0.5;
+}
+
+/* iOS 文本输入（自定义分钟 / 新三级标题） */
+.ios-input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+/* 三级计划行里的复选（借用 .ios-qrow 的两行骨架，只调 checkbox 外观） */
+.ios-qrow input[type='checkbox'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: var(--ios-blue);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   番茄钟 · 右栏工作区优化（SessionWorkspace / FocusedWorkItemNote）
+   ──────────────────────────────────────────────────────────────────────────
+   将原生无样式元素（Current plan / Session note / Append paragraph）
+   全面重构为符合苹果设计语言（iOS Card / Glassmorphism）的高级质感组件。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.ios-plan-card,
+.ios-note-card,
+.ios-work-item-note {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ios-plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ios-plan-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 0.5px solid var(--ios-sep);
+  background: var(--ios-fill);
+  transition: all 0.15s ease;
+}
+
+.ios-plan-item[data-current='true'] {
+  background: color-mix(in oklab, var(--ios-blue) 10%, var(--ios-card));
+  border-color: color-mix(in oklab, var(--ios-blue) 45%, transparent);
+}
+
+.ios-plan-radio {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ios-blue);
+  cursor: pointer;
+}
+
+.ios-plan-title-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ios-label);
+  cursor: pointer;
+}
+
+.ios-plan-title-btn:hover .ios-plan-title {
+  color: var(--ios-blue);
+}
+
+.ios-plan-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.ios-plan-badge {
+  flex: none;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2.5px 6px;
+  border-radius: 999px;
+  background: var(--ios-blue);
+  color: #fff;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+
+.ios-plan-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ios-plan-check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+  cursor: pointer;
+  user-select: none;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--ios-card);
+  border: 0.5px solid var(--ios-sep);
+}
+
+.ios-plan-check-label input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--ios-blue);
+}
+
+.ios-plan-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 0.5px solid var(--ios-sep);
+  background: var(--ios-card);
+  color: var(--ios-label-3);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+
+.ios-plan-remove-btn:hover {
+  color: #ef4444;
+  border-color: color-mix(in oklab, #ef4444 40%, transparent);
+  background: color-mix(in oklab, #ef4444 8%, var(--ios-card));
+}
+
+.ios-candidate-group {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--ios-sep);
+}
+
+.ios-candidate-label {
+  font-size: 11px;
+  color: var(--ios-label-2);
+  margin-bottom: 6px;
+}
+
+.ios-candidate-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ios-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  border: 0.5px solid var(--ios-sep);
+  background: var(--ios-fill);
+  color: var(--ios-label);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ios-chip-btn:hover {
+  background: color-mix(in oklab, var(--ios-blue) 12%, var(--ios-card));
+  border-color: var(--ios-blue);
+  color: var(--ios-blue);
+}
+
+.ios-plan-create-form {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--ios-sep);
+}
+
+.ios-btn-subtle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 0.5px solid var(--ios-sep);
+  background: var(--ios-fill);
+  color: var(--ios-label);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.ios-btn-subtle:hover:not(:disabled) {
+  background: var(--ios-card);
+  border-color: var(--ios-blue);
+  color: var(--ios-blue);
+}
+
+.ios-btn-subtle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ios-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 64px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ios-textarea:focus {
+  outline: none;
+  border-color: var(--ios-blue);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ios-blue) 20%, transparent);
+}
+
+.ios-textarea::placeholder {
+  color: var(--ios-label-3);
+  font-size: 12px;
+}
+
+.ios-existing-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--ios-fill);
+}
+
+.ios-note-block-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ios-label);
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: var(--ios-card);
+  border: 0.5px solid var(--ios-sep);
+}
+
+.ios-note-block-dot {
+  color: var(--ios-blue);
+  font-size: 13px;
+  flex: none;
+}
+
+.ios-note-block-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.ios-checklist-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 0.5px solid var(--ios-sep);
+}
+
+.ios-checklist-bullet {
+  color: var(--ios-blue);
+  font-size: 14px;
+  flex: none;
+}
+
+.ios-checklist-subbullet {
+  color: var(--ios-label-3);
+  font-size: 12px;
+  flex: none;
+}
+
+.ios-error-text {
+  font-size: 11.5px;
+  color: #ef4444;
+  margin-top: 4px;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   复盘提炼卡片（PXII-FEAT-REVIEW-HARVEST，2026-10-02）
+   ──────────────────────────────────────────────────────────────────────────
+   位置：复盘面板**可写态**的表单之后、页脚之前。它是「本轮思考 → 任务/笔记」
+   的唯一落点，所以必须比表单更轻：低饱和底 + 细描边，**不抢**有效性/结果
+   字段的注意力（那是复盘必须答的，这是复盘顺手能做的）。
+   完成态颜色复用 iOS systemGreen（--ios-green，与 .wm-sub-island-check
+   一致）——「已完成」这一种语义不允许出现第二种绿。 */
+
+/* 挂载位：不额外加边距，让卡片自己带出层次 */
+.harvest-mount {
+  display: block;
+}
+
+/* iOS 主按钮显式变体：与 .ios-btn（本身就是 systemBlue filled）等价，
+   单独成类是为了让「沉淀」这个**唯一**主动作在语义上可检索、可覆盖，
+   而不必靠猜调用处用的是哪个按钮基类。 */
+.ios-btn-primary {
+  background: var(--ios-blue);
+  color: #fff;
+}
+
+.ios-btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.harvest-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 13px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 11px;
+  background: var(--ios-fill);
+}
+
+.harvest-hd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.harvest-hd-title {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ios-label);
+}
+
+.harvest-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.harvest-block-title {
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+
+.harvest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.harvest-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 0.5px solid var(--ios-sep);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.harvest-item:last-child {
+  border-bottom: none;
+}
+
+.harvest-check {
+  flex: none;
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--ios-blue);
+}
+
+/* 标题单行截断：待办标题可能很长，不截断会把 44px 触控行撑成两行块 */
+.harvest-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ios-label);
+}
+
+.harvest-sub {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ios-label-3);
+}
+
+/* 已升格：只读成果行（无勾选框），绿意只落在标记与编号上 */
+.harvest-list--done {
+  padding-top: 4px;
+  border-top: 0.5px solid var(--ios-sep);
+}
+
+.harvest-done {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--ios-label-2);
+}
+
+.harvest-done-mark,
+.harvest-done-key {
+  flex: none;
+  color: var(--ios-green);
+  font-variant-numeric: tabular-nums;
+}
+
+.harvest-done-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harvest-toggle {
+  align-self: flex-start;
+}
+
+.harvest-preview {
+  max-height: 180px;
+  margin: 0;
+  padding: 9px 10px;
+  overflow: auto;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 动作按钮：撑满一行，避免 44px 主按钮与 36px 次按钮并排时高矮不齐 */
+.harvest-submit {
+  align-self: stretch;
+}
+
+.harvest-status {
+  margin: 0;
 }

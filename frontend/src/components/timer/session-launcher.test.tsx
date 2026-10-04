@@ -1,8 +1,15 @@
 import { createElement } from 'react'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { SessionLauncher } from './session-launcher'
+import { SessionLauncher, deriveLaunchSelection } from './session-launcher'
 import { useSettingsStore } from '@/stores/settings-store'
+
+/**
+ * ② 任务选择 Modal 落地后（外派单 2026-10-02）：启动器是受控视图 ——
+ * 归属/三级计划的状态源在页面（Modal 写、本组件读），派生映射单独锁在
+ * `deriveLaunchSelection` 的纯函数用例里。归属 select / 三级 checkbox /
+ * 内联新建三级的交互断言在 `task-picker-modal.test.tsx`。
+ */
 
 const items = [
   { id: 'l1', depth: 1, parentId: null, title: 'Project goal', displayKey: 'P-1', childRank: 0 },
@@ -11,39 +18,94 @@ const items = [
   { id: 'l3-b', depth: 3, parentId: 'l2', title: 'Record evidence', displayKey: 'P-4', childRank: 1 },
 ] as never
 
+describe('deriveLaunchSelection（store 选中项 → 启动选择映射）', () => {
+  it('三级选中 → 映射到二级父项 + 本身进计划', () => {
+    expect(deriveLaunchSelection(items, 'l3-a')).toEqual({
+      level2Id: 'l2', level3Ids: ['l3-a'], requiresLevel2: false,
+    })
+  })
+
+  it('二级选中 → 归属自身、计划为空', () => {
+    expect(deriveLaunchSelection(items, 'l2')).toEqual({
+      level2Id: 'l2', level3Ids: [], requiresLevel2: false,
+    })
+  })
+
+  it('一级选中 → requiresLevel2（页面据此提示先去选二级）', () => {
+    expect(deriveLaunchSelection(items, 'l1')).toEqual({
+      level2Id: null, level3Ids: [], requiresLevel2: true,
+    })
+  })
+
+  it('未选中 → 全空', () => {
+    expect(deriveLaunchSelection(items, null)).toEqual({
+      level2Id: null, level3Ids: [], requiresLevel2: false,
+    })
+  })
+})
+
+function renderLauncher({
+  level2Id = 'l2',
+  level3Ids = [],
+  onLevel3IdsChange,
+  onStart,
+}: {
+  level2Id?: string | null
+  level3Ids?: string[]
+  onLevel3IdsChange?: (next: string[]) => void
+  onStart?: (selection: unknown) => Promise<void> | void
+} = {}) {
+  // ★ 解构默认值只对 undefined 生效 —— level2Id: null 必须原样透传（测"未选归属"）。
+  return render(createElement(SessionLauncher, {
+    items,
+    level2Id,
+    level3Ids,
+    onLevel3IdsChange,
+    onStart: onStart ?? vi.fn(),
+  }))
+}
+
 describe('SessionLauncher', () => {
-  it('maps a level-3 start to its level-2 parent and freezes the selected level 3', () => {
+  it('受控提交：level2Id + level3Ids 原样进入启动载荷（休息判定之外的直通）', () => {
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l3-a', onStart: start }))
+    renderLauncher({ level2Id: 'l2', level3Ids: ['l3-a', 'l3-b'], onStart: start })
 
     fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
 
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      level2WorkItemId: 'l2', level3WorkItemIds: ['l3-a'],
+      level2WorkItemId: 'l2', level3WorkItemIds: ['l3-a', 'l3-b'],
     }))
   })
 
-  it('allows a level-2 Session with no level-3 plan', () => {
-    const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+  it('已选摘要可见：归属标题 + 三级计划计数（关掉 Modal 不失忆，外派单验收 3）', () => {
+    renderLauncher({ level2Id: 'l2', level3Ids: ['l3-a'] })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
-
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ level3WorkItemIds: [] }))
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 1 项')
   })
 
-  it('requires selecting or creating a level-2 child for a level-1 start', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l1', onStart: vi.fn() }))
+  it('未选归属时摘要明说去哪挑', () => {
+    renderLauncher({ level2Id: null })
+
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('归属：未选择')
+  })
+
+  it('requires 二级但未选：CTA 禁用 + status 指向「浏览全部任务」入口（Level 2 attribution 口径保留）', () => {
+    renderLauncher({ level2Id: null })
 
     expect(screen.getByRole('button', { name: 'Start focus session' })).toBeDisabled()
-    expect(screen.getByLabelText('Level 2 attribution')).toBeRequired()
+    expect(screen.getByRole('status')).toHaveTextContent(/Level 2 attribution/)
+    expect(screen.getByRole('status')).toHaveTextContent(/浏览全部任务/)
   })
 
   it('explains why Start is disabled when no level-2 exists to attribute to', () => {
     const onlyLevel1 = [
       { id: 'l1', depth: 1, parentId: null, title: 'Project goal', displayKey: 'P-1', childRank: 0 },
     ] as never
-    render(createElement(SessionLauncher, { items: onlyLevel1, initialWorkItemId: 'l1', onStart: vi.fn() }))
+    // 页面对 L1 选中项派生出的 level2Id 是 null（deriveLaunchSelection），据此渲染
+    render(createElement(SessionLauncher, {
+      items: onlyLevel1, level2Id: null, level3Ids: [], onStart: vi.fn(),
+    }))
 
     // 按钮必须仍然禁用，但页面要说明「为什么」以及「去哪补」
     expect(screen.getByRole('button', { name: 'Start focus session' })).toBeDisabled()
@@ -52,36 +114,17 @@ describe('SessionLauncher', () => {
     expect(status).toHaveTextContent(/任务/)
   })
 
-  it('prompts the user to pick a level-2 when options exist but none is chosen', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: null, onStart: vi.fn() }))
-
-    expect(screen.getByRole('button', { name: 'Start focus session' })).toBeDisabled()
-    expect(screen.getByRole('status')).toHaveTextContent(/Level 2 attribution/)
-  })
-
   it('shows no explanatory status once a level-2 is selected', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+    renderLauncher({ level2Id: 'l2' })
 
     expect(screen.queryByRole('status')).toBeNull()
-  })
-
-  it('rebinds attribution when the selected WorkItem changes after mount', () => {
-    const start = vi.fn()
-    const view = render(createElement(SessionLauncher, { items, initialWorkItemId: null, onStart: start }))
-
-    view.rerender(createElement(SessionLauncher, { items, initialWorkItemId: 'l3-b', onStart: start }))
-    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
-
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      level2WorkItemId: 'l2', level3WorkItemIds: ['l3-b'],
-    }))
   })
 
   it('disables the start button while a start is pending and submits only once', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const start = vi.fn().mockImplementation(() => gate)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    renderLauncher({ level2Id: 'l2', onStart: start })
     const button = screen.getByRole('button', { name: 'Start focus session' })
 
     fireEvent.click(button)
@@ -102,7 +145,7 @@ describe('SessionLauncher 时长预设（工单④）', () => {
   it('默认时长来自设置而非硬编码（45 分钟设置 → 载荷 2700s）', () => {
     useSettingsStore.setState({ pomodoroDuration: 45 })
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    renderLauncher({ level2Id: 'l2', onStart: start })
 
     expect(screen.getByLabelText('Planned minutes')).toHaveValue(45)
     fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
@@ -112,7 +155,7 @@ describe('SessionLauncher 时长预设（工单④）', () => {
 
   it('点击预设同步输入与提交载荷，命中项呈选中态（aria-pressed）', () => {
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    renderLauncher({ level2Id: 'l2', onStart: start })
 
     fireEvent.click(screen.getByRole('button', { name: '90 分钟' }))
 
@@ -124,7 +167,7 @@ describe('SessionLauncher 时长预设（工单④）', () => {
 
   it('自定义输入后无预设呈选中态，自定义值照常进入载荷', () => {
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    renderLauncher({ level2Id: 'l2', onStart: start })
 
     fireEvent.change(screen.getByLabelText('Planned minutes'), { target: { value: '30' } })
     for (const minutes of [25, 45, 60, 90]) {
@@ -146,7 +189,7 @@ describe('SessionLauncher 模式切换（双体系兼容）', () => {
 
   it('默认 work：提交载荷显式携带 sessionType=work（旧行为语义不变）', () => {
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    renderLauncher({ level2Id: 'l2', onStart: start })
 
     expect(screen.getByRole('button', { name: '专注' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
@@ -155,7 +198,7 @@ describe('SessionLauncher 模式切换（双体系兼容）', () => {
 
   it('切到短休：默认时长取 shortBreakDuration、环下文案改「休息时长」、载荷带短休模式', () => {
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    renderLauncher({ level2Id: 'l2', level3Ids: ['l3-a'], onStart: start })
 
     fireEvent.click(screen.getByRole('button', { name: '短休息' }))
 
@@ -169,22 +212,17 @@ describe('SessionLauncher 模式切换（双体系兼容）', () => {
     }))
   })
 
-  it('切到长休：取 longBreakDuration；三级计划控件整组换成说明（服务端拒绝休息带计划）', () => {
+  it('切到长休：取 longBreakDuration；清空三级勾选写回页面状态源（休息不带计划）', () => {
+    const onLevel3IdsChange = vi.fn()
     const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, {
-      items, initialWorkItemId: 'l3-a', onStart: start, onCreateLevel3: vi.fn(),
-    }))
-
-    // 切到长休前：三级计划区存在，且初始选中项已冻结进计划
-    expect(screen.queryByTestId('break-plan-note')).toBeNull()
+    renderLauncher({ level2Id: 'l2', level3Ids: ['l3-a'], onLevel3IdsChange, onStart: start })
 
     fireEvent.click(screen.getByRole('button', { name: '长休息' }))
 
     expect(screen.getByLabelText('Planned minutes')).toHaveValue(15)
     expect(screen.getByTestId('break-plan-note')).toHaveTextContent('只记录休息时长')
-    // 三级清单/内联新建整组消失（不是"点了必被拒"）
-    expect(screen.queryByText('Level 3 plan')).toBeNull()
-    expect(screen.queryByLabelText('新三级标题')).toBeNull()
+    // 三级勾选清空写回页面（Modal 再打开时不会看到过期勾选）
+    expect(onLevel3IdsChange).toHaveBeenCalledWith([])
 
     fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
@@ -193,7 +231,7 @@ describe('SessionLauncher 模式切换（双体系兼容）', () => {
   })
 
   it('休息模式的时长预设换成分模式预设（5/10/15），work 预设不再出现', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+    renderLauncher({ level2Id: 'l2' })
 
     fireEvent.click(screen.getByRole('button', { name: '短休息' }))
 
@@ -205,7 +243,7 @@ describe('SessionLauncher 模式切换（双体系兼容）', () => {
   })
 
   it('从休息切回工作：恢复 work 默认时长与 work 预设', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+    renderLauncher({ level2Id: 'l2' })
 
     fireEvent.click(screen.getByRole('button', { name: '短休息' }))
     fireEvent.click(screen.getByRole('button', { name: '专注' }))
@@ -222,7 +260,7 @@ describe('SessionLauncher 准备态静止环预览（工单②）', () => {
   })
 
   it('静止环：空弧（dashoffset=C）、无 live/overtime 类；数字与「专注时长」在预览容器内', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+    renderLauncher({ level2Id: 'l2' })
 
     const preview = screen.getByTestId('launcher-ring-preview')
     expect(preview).toHaveTextContent('25:00')
@@ -239,137 +277,12 @@ describe('SessionLauncher 准备态静止环预览（工单②）', () => {
   })
 
   it('随预设点击与分钟输入实时更新（与运行态同格式；分钟不封顶）', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+    renderLauncher({ level2Id: 'l2' })
 
     fireEvent.click(screen.getByRole('button', { name: '90 分钟' }))
     expect(screen.getByTestId('launcher-ring-preview')).toHaveTextContent('90:00')
 
     fireEvent.change(screen.getByLabelText('Planned minutes'), { target: { value: '150' } })
     expect(screen.getByTestId('launcher-ring-preview')).toHaveTextContent('150:00')
-  })
-})
-
-// ── 工单③ 2026-09-14：准备态内联新建三级（自动加入计划） ───────────────────
-describe('SessionLauncher 准备态内联新建三级（工单③）', () => {
-  beforeEach(() => {
-    useSettingsStore.setState({ pomodoroDuration: 25 })
-  })
-
-  it('未提供 onCreateLevel3 时不渲染新建控件（与运行态同约定）', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
-
-    expect(screen.queryByRole('button', { name: '+ 新建三级' })).toBeNull()
-    expect(screen.queryByLabelText('新三级标题')).toBeNull()
-  })
-
-  it('未选 L2：整组随 fieldset 禁用；选中后空标题仍禁提交', () => {
-    render(createElement(SessionLauncher, { items, initialWorkItemId: null, onStart: vi.fn(), onCreateLevel3: vi.fn() }))
-
-    const input = screen.getByLabelText('新三级标题')
-    const submit = screen.getByRole('button', { name: '+ 新建三级' })
-    expect(input).toBeDisabled()
-    expect(submit).toBeDisabled()
-
-    fireEvent.change(screen.getByLabelText('Level 2 attribution'), { target: { value: 'l2' } })
-    expect(input).not.toBeDisabled()
-    expect(submit).toBeDisabled()
-  })
-
-  it('成功：修剪标题后提交、返回 id 自动加入本轮计划（不在 candidates 也先收下）、输入清空', async () => {
-    const create = vi.fn().mockResolvedValue('l3-new')
-    const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start, onCreateLevel3: create }))
-
-    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '  写验收报告  ' } })
-    // 点击后的 resolve 续体（清输入 + 追加计划）在 act 边界内冲刷，
-    // 与既有 waitFor 模式等价、但不额外制造 act 提示噪声。
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
-    })
-
-    await waitFor(() => expect(create).toHaveBeenCalledWith('l2', '写验收报告'))
-    await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
-    })
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      level2WorkItemId: 'l2', level3WorkItemIds: ['l3-new'],
-    }))
-  })
-
-  it('空标题或纯空格不提交', () => {
-    const create = vi.fn()
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn(), onCreateLevel3: create }))
-
-    const submit = screen.getByRole('button', { name: '+ 新建三级' })
-    expect(submit).toBeDisabled()
-
-    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '   ' } })
-    expect(submit).toBeDisabled()
-    fireEvent.click(submit)
-
-    expect(create).not.toHaveBeenCalled()
-  })
-
-  it('失败：role="alert" 呈现原因、输入保留（离线创建禁令必须可见）', async () => {
-    const create = vi.fn().mockRejectedValue(new Error('offline_formal_creation_forbidden'))
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn(), onCreateLevel3: create }))
-
-    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '离线想建' } })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
-    })
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('offline_formal_creation_forbidden')
-    expect(screen.getByLabelText('新三级标题')).toHaveValue('离线想建')
-  })
-
-  it('提交期间切换 L2：完成后的新项不误挂进新 L2 的计划（防错挂）', async () => {
-    const twoLevel2Items = [
-      { id: 'l1', depth: 1, parentId: null, title: 'Project goal', displayKey: 'P-1', childRank: 0 },
-      { id: 'l2', depth: 2, parentId: 'l1', title: 'Ship feature', displayKey: 'P-2', childRank: 0 },
-      { id: 'l2-b', depth: 2, parentId: 'l1', title: 'Second feature', displayKey: 'P-5', childRank: 1 },
-      { id: 'l3-a', depth: 3, parentId: 'l2', title: 'Verify output', displayKey: 'P-3', childRank: 0 },
-    ] as never
-    let settle: (id: string) => void = () => undefined
-    const create = vi.fn().mockImplementation(() => new Promise<string>((resolve) => { settle = resolve }))
-    const start = vi.fn().mockResolvedValue(undefined)
-    render(createElement(SessionLauncher, {
-      items: twoLevel2Items, initialWorkItemId: 'l2', onStart: start, onCreateLevel3: create,
-    }))
-
-    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '晚到的三级' } })
-    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
-    await waitFor(() => expect(create).toHaveBeenCalledWith('l2', '晚到的三级'))
-
-    // 创建还悬着，用户切到另一个 L2
-    fireEvent.change(screen.getByLabelText('Level 2 attribution'), { target: { value: 'l2-b' } })
-
-    await act(async () => {
-      settle('l3-late')
-    })
-    await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
-    })
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      level2WorkItemId: 'l2-b', level3WorkItemIds: [],
-    }))
-  })
-
-  it('输入框回车等效内联提交，且不会误触外层「开始专注」', async () => {
-    const create = vi.fn().mockResolvedValue('l3-enter')
-    const start = vi.fn()
-    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start, onCreateLevel3: create }))
-
-    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '回车新建' } })
-    await act(async () => {
-      fireEvent.keyDown(screen.getByLabelText('新三级标题'), { key: 'Enter' })
-    })
-
-    await waitFor(() => expect(create).toHaveBeenCalledWith('l2', '回车新建'))
-    expect(start).not.toHaveBeenCalled()
   })
 })

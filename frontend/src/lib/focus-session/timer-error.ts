@@ -9,6 +9,7 @@ const SESSION_ERROR_MESSAGES: Record<string, string> = {
   stale_session_owner: '当前会话已被其他窗口接管，已切换为只读。',
   stale_active_session_response: '会话状态已更新，请稍候刷新。',
   active_session_exists: '当前空间已有进行中的会话，请先结束或等待其完成。',
+  active_session_not_owned: '当前会话由其他标签页或设备持有，请先点击时钟下方的「在本标签页接管」后再操作。',
   blocked_conflict: '存在未解决的激活冲突，当前会话只读。',
   activation_conflict: '存在未解决的激活冲突，请选择会话后继续。',
   not_found: '会话不存在或已被删除。',
@@ -52,6 +53,7 @@ export function resolveTimerError(error: unknown): { code: string; message: stri
       if (raw.startsWith('active_session_exists:')) code = 'active_session_exists'
       else if (raw.startsWith('stale_session_owner')) code = 'stale_session_owner'
       else if (raw.startsWith('stale_active_session_response')) code = 'stale_active_session_response'
+      else if (raw === 'active_session_not_owned') code = 'active_session_not_owned'
     }
   }
 

@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionWorkspace } from './session-workspace'
 
@@ -91,14 +91,14 @@ describe('SessionWorkspace', () => {
   })
 })
 
-describe('SessionWorkspace 运行中新建三级（工单②）', () => {
+describe('SessionWorkspace 运行中拆解行动（工单②，文案 2026-10-01 升级）', () => {
   it('提供 onCreatePlanItem 时渲染内联新建控件，未提供时不渲染', () => {
     const withCreate = render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: vi.fn() }))
-    expect(screen.getByRole('button', { name: '+ 新建三级' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '+ 拆解行动' })).toBeInTheDocument()
     withCreate.unmount()
 
     render(createElement(SessionWorkspace, { session, plans }))
-    expect(screen.queryByRole('button', { name: '+ 新建三级' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '+ 拆解行动' })).toBeNull()
   })
 
   it('提交回调携带修剪后的标题，成功后清空输入', async () => {
@@ -106,7 +106,7 @@ describe('SessionWorkspace 运行中新建三级（工单②）', () => {
     render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '  写验收报告  ' } })
-    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
     await waitFor(() => expect(create).toHaveBeenCalledWith('写验收报告'))
     await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
@@ -117,7 +117,7 @@ describe('SessionWorkspace 运行中新建三级（工单②）', () => {
     render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
 
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '离线想建' } })
-    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('offline_formal_creation_forbidden')
     expect(screen.getByLabelText('新三级标题')).toHaveValue('离线想建')
@@ -127,10 +127,100 @@ describe('SessionWorkspace 运行中新建三级（工单②）', () => {
     const create = vi.fn()
     render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
 
-    const submit = screen.getByRole('button', { name: '+ 新建三级' })
+    const submit = screen.getByRole('button', { name: '+ 拆解行动' })
     expect(submit).toBeDisabled()
     fireEvent.click(submit)
 
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('拆解是连续动作：成功提交后焦点留在输入框，可直接敲下一条', async () => {
+    const create = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
+
+    const input = screen.getByLabelText('新三级标题') as HTMLInputElement
+    const form = input.closest('form')
+    expect(form).not.toBeNull()
+    input.focus()
+
+    // 回车 = 表单隐式提交（jsdom 不实现隐式提交，直接派发 submit 走同一代码路径）
+    fireEvent.change(input, { target: { value: '第一项' } })
+    fireEvent.submit(form!)
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith('第一项'))
+    await waitFor(() => expect(input).toHaveValue(''))
+    // 焦点必须显式交还输入框：连续拆解不能要求用户每次点回输入框
+    expect(document.activeElement).toBe(input)
+
+    fireEvent.change(input, { target: { value: '第二项' } })
+    fireEvent.submit(form!)
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2))
+    expect(create).toHaveBeenNthCalledWith(2, '第二项')
+    expect(document.activeElement).toBe(input)
+  })
+
+  it('在途防重：一次创建未落定前再按回车，不会造出第二个三级项', async () => {
+    let release: () => void = () => undefined
+    const create = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
+
+    const input = screen.getByLabelText('新三级标题') as HTMLInputElement
+    const form = input.closest('form')!
+    // ★ 用**原生派发**而不是 fireEvent：fireEvent 每次都会把 React 的更新冲干净，
+    //   两次提交之间必然夹着一次渲染，state 判重就"看起来够用"了。真实回车连击
+    //   是两次 keydown 落在同一批渲染里 —— 那时 state 还没回流，只有 ref 拦得住
+    //   （实测：把判重换成 state 时，这里会创建出两个 WorkItem）。
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    const submit = () => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    // 同一个 act 批次内的两次提交：状态更新要等批次结束才回流，
+    // 第二次提交看到的 creating 仍是 false —— 与真实连击同形。
+    act(() => {
+      setValue.call(input, '只此一次')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      submit()
+      submit()
+    })
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(create).toHaveBeenCalledWith('只此一次')
+
+    await act(async () => { release() })
+    await waitFor(() => expect(input).toHaveValue(''))
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('在途期间提交按钮禁用（可见反馈，不只是静默拦住）', async () => {
+    let release: () => void = () => undefined
+    const create = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
+
+    const input = screen.getByLabelText('新三级标题')
+    fireEvent.change(input, { target: { value: '在途' } })
+    fireEvent.submit(input.closest('form')!)
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '+ 拆解行动' })).toBeDisabled())
+
+    await act(async () => { release() })
+    await waitFor(() => expect(input).toHaveValue(''))
+  })
+
+  it('父级轻提示：有 parentTitle 时如实说明挂在哪，缺省 / 空白时整行不渲染', () => {
+    const withParent = render(createElement(SessionWorkspace, {
+      session, plans, onCreatePlanItem: vi.fn(), parentTitle: 'Ship feature',
+    }))
+    expect(screen.getByTestId('plan-create-parent-hint'))
+      .toHaveTextContent('在「Ship feature」下新建行动项')
+    withParent.unmount()
+
+    const blank = render(createElement(SessionWorkspace, {
+      session, plans, onCreatePlanItem: vi.fn(), parentTitle: '   ',
+    }))
+    expect(screen.queryByTestId('plan-create-parent-hint')).toBeNull()
+    blank.unmount()
+
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: vi.fn() }))
+    expect(screen.queryByTestId('plan-create-parent-hint')).toBeNull()
   })
 })

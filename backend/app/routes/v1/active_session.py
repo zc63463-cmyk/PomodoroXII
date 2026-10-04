@@ -81,6 +81,28 @@ def _flatten_session_response(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _map_locator_response(value: Any) -> ActiveSessionLocatorResponse:
+    """把 coordinator 的**嵌套** locator 视图摊平成 locator 响应（2026-10-03 修）。
+
+    Coordinator 返回的形状是 ``{"locator": {...}, "operation": {...}}``
+    （见 ``coordinator.py`` 的 ``_locator_view`` / ``_locator_aggregate_view``），
+    而 ``ActiveSessionLocatorResponse`` 是 ``extra="forbid"`` 的**扁平** wire 模型
+    —— 多一层 ``locator`` 包装、少一个该被丢掉的 ``operation``，两端都对不上。
+
+    旧实现直接 ``model_validate(dict(view.value))``，于是 heartbeat 恒 500
+    （实测 10 个字段 missing + 1 个 extra）。
+
+    与 ``_flatten_session_response`` 同一姿势：**解包只认 ``locator`` 一层**，
+    缺键即 fail-loud（不静默返回半个响应）。
+    """
+    payload = dict(value)
+    locator = payload.get("locator")
+    if not isinstance(locator, Mapping):
+        raise TypeError("active_session.locator_response_missing_locator")
+    # 只取 locator 内的字段：``operation`` 明细不属于本响应（extra=forbid）
+    return ActiveSessionLocatorResponse.model_validate(dict(locator))
+
+
 def _map_active_operation_response(value: Any) -> ActiveSessionOperationResponse:
     if isinstance(value, Mapping) and value.get("kind") == "activation_conflict":
         # The coordinator's conflict view spreads the locator fields at the
@@ -443,7 +465,7 @@ async def heartbeat(
         body, space_id=None, payload=_map_heartbeat_payload(body.payload)
     )
     view = await coordinator.heartbeat(_master_principal(claims), command)
-    return ActiveSessionLocatorResponse.model_validate(dict(view.value))
+    return _map_locator_response(view.value)
 
 
 @router.post("/pause", response_model=ActiveSessionResponse)
