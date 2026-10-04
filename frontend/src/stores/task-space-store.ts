@@ -260,6 +260,26 @@ export interface TaskSpaceActions {
   // D5 Y: converge the work item label set (add=true union, false removal).
   toggleWorkItemLabel: (workItemId: string, labelId: string, add: boolean) => Promise<CachedWorkItem>
 
+  // ---- 标签定义生命周期（D5 Y 接续，2026-10-04） -------------------------
+  // ★ 为什么这三个到本轮才补：repository 层早有 createLabel/updateLabel/
+  //   archiveLabel（task-space-repository.ts:593-621，连 resume 重放都注册了），
+  //   但 TaskSpaceActions 只暴露了 toggleWorkItemLabel —— **页面拿不到建标签的方法**。
+  //   这就是库里6 个空间 labels 全为 0 的根因：不是没人要，是**没法建**。
+  //   （别再把「0 使用」读成「没需求」—— 0 使用也可能是 0 入口的结果。）
+  //
+  // ★ expectedVersion 由 repository 从本地缓存行自取（repository.ts:604/615），
+  //   与状态定义不同（那边由调用方传），所以这里只传 labelId。
+  //   后端 Create/Update/ArchiveLabelRequest 都要求 expected_version，改名/归档
+  //   走的是同一条 CAS 路径；stale 时报 version_conflict，不静默覆盖。
+  createLabel: (input: { name: string; color?: string | null }) => Promise<CachedLabel>
+  updateLabel: (input: {
+    labelId: string
+    name?: string
+    color?: string | null
+  }) => Promise<CachedLabel>
+  /** 软删除（写 archived_at）：历史 sync 事件仍可回放，不物理删行。 */
+  archiveLabel: (input: { labelId: string }) => Promise<CachedLabel>
+
   // ---- 状态定义生命周期（状态双轴阶段 3） -------------------------------
   // ★ 与上面的 repository 接口**同名但不同层**：那边是「repository 提供什么能力」，
   //   这边是「页面可以调什么 action」。两个都要写，否则页面拿不到方法。
@@ -1548,8 +1568,69 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           const mapped = resolveTaskSpaceMutationError(error)
           set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
           throw error
-        } finally {
-          endMutation(workItemId)
+          } finally {
+            endMutation(workItemId)
+          }
+        },
+
+      // ---- 标签定义生命周期（D5 Y 接续，2026-10-04） ---------------------
+      // ★ 三个 action 与上面的 createStatusDefinition 同构：只做
+      //   「委派 repository + 刷新 definitions + 错误映射」，不本地乐观改写。
+      //   标签行参与 sync post-image 与 version CAS，本地猜 version 会与服务端
+      //   分叉（同 createStatusDefinition 注释里的 labelIds 教训）。
+      //   离线写入由 repository 的 intent/outbox 承担（三个 kind 都已注册重放）。
+
+      async createLabel(input: { name: string; color?: string | null }) {
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          const created = await repository.createLabel(input)
+          // 关键：刷新 definitions 才有新标签 —— 否则详情页的 add-select
+          // 仍然是空 options，用户建完看不到，等于没建成功。
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+          return created
+        } catch (error) {
+          // 409 label_name_conflict 在此被映射成说人话的文案，由面板透出。
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: '__label__', code: mapped.code } })
+          throw error
+        }
+      },
+
+      async updateLabel(input: {
+        labelId: string
+        name?: string
+        color?: string | null
+      }) {
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          const updated = await repository.updateLabel(input)
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+          return updated
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: input.labelId, code: mapped.code } })
+          throw error
+        }
+      },
+
+      async archiveLabel(input: { labelId: string }) {
+        // 软删除：repository 从本地缓存行取 expectedVersion 走 CAS；
+        // 仍被工作项引用时后端 409，映射文案由面板透出，不静默吞掉。
+        const repository = get().repository
+        if (!repository) throw new Error('task_space_repository_not_ready')
+        try {
+          const archived = await repository.archiveLabel(input)
+          await refreshDefinitionsOnly(repository, set)
+          set({ error: null })
+          return archived
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: input.labelId, code: mapped.code } })
+          throw error
         }
       },
 

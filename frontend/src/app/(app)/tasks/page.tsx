@@ -20,6 +20,11 @@ import { StatusDefinitionPanel } from '@/components/task-space/status-definition
 //   口径在 lib/task-space/due-date-selectors（本地日期键 + 字符串比较，单测钉死）。
 import { DueDatePanel } from '@/components/task-space/due-date-panel'
 import { bucketDueDates, localTodayKey } from '@/lib/task-space/due-date-selectors'
+// ★ 2026-10-04（D5 Y 接续）：标签定义管理面板。
+//   后端 3 命令 + repository 3 方法 + 详情页 chips/add-select 早就齐全，
+//   唯独缺「建标签的入口」⇒库里 labels 全是 0 行（0 使用其实是 0 入口）。
+//   本面板只补这个入口；store 的 createLabel/updateLabel/archiveLabel 同批补齐。
+import { LabelDefinitionPanel } from '@/components/task-space/label-definition-panel'
 import { LaunchSessionButton } from '@/components/task-space/launch-session-button'
 import { WorkItemDetail } from '@/components/task-space/work-item-detail'
 import { ActiveChildConflictDialog } from '@/components/task-space/active-child-conflict-dialog'
@@ -133,6 +138,31 @@ export default function TasksPage() {
   const updateStatusDefinition = useTaskSpaceStore((state) => state.updateStatusDefinition)
   const reorderStatusDefinition = useTaskSpaceStore((state) => state.reorderStatusDefinition)
   const archiveStatusDefinition = useTaskSpaceStore((state) => state.archiveStatusDefinition)
+
+  // ★ 2026-10-04（D5 Y 接续）：标签定义抽屉 + 三个 CRUD action。
+  //   这三个 action 是本批**新补**的（store 此前只有 toggleWorkItemLabel），
+  //   底层 repository 方法早就有 —— 页面拿不到方法才是 0 标签的根因。
+  const [labelPanelOpen, setLabelPanelOpen] = useState(false)
+  const [labelPanelError, setLabelPanelError] = useState<string | null>(null)
+  const createLabel = useTaskSpaceStore((state) => state.createLabel)
+  const updateLabel = useTaskSpaceStore((state) => state.updateLabel)
+  const archiveLabel = useTaskSpaceStore((state) => state.archiveLabel)
+
+  // 同 runStatusAction：把 store 映射好的 message 透给面板，不静默吞掉
+  // 409 label_name_conflict（标签名空间内唯一）—— 用户需要知道为什么没建成功。
+  const runLabelAction = useCallback(
+    async (action: () => Promise<unknown>) => {
+      try {
+        setLabelPanelError(null)
+        await action()
+      } catch (error) {
+        setLabelPanelError(
+          error instanceof Error ? error.message : '标签操作失败，请稍后重试',
+        )
+      }
+    },
+    [],
+  )
 
   // 面板的错误要**说人话**：store 里存的是 error message，这里直接透出。
   // ★ 不静默吞掉 409 status_definition_in_use —— 那是「这个状态还被工作项引用着」，
@@ -691,6 +721,17 @@ export default function TasksPage() {
         >
           {statusPanelOpen ? '关闭状态管理' : '状态管理'}
         </Button>
+        {/* ★ 2026-10-04：标签管理入口。没有它就建不出标签，详情页的
+            标签下拉会永远是空的（labels 表 0 行的根因）。 */}
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          data-testid="open-label-panel"
+          onClick={() => setLabelPanelOpen((open) => !open)}
+        >
+          {labelPanelOpen ? '关闭标签管理' : '标签管理'}
+        </Button>
       </div>
       {statusPanelOpen ? (
         <section
@@ -709,6 +750,28 @@ export default function TasksPage() {
             onRename={(input) => runStatusAction(() => updateStatusDefinition(input))}
             onArchive={(input) => runStatusAction(() => archiveStatusDefinition(input))}
             onReorder={(input) => runStatusAction(() => reorderStatusDefinition(input))}
+          />
+        </section>
+      ) : null}
+      {/* ★ 2026-10-04（D5 Y 接续）：标签定义抽屉。与状态抽屉同一范式，
+          按需覆盖、关闭后布局原样（现有三栏 180/280/1fr 不加第四栏）。 */}
+      {labelPanelOpen ? (
+        <section
+          data-testid="label-panel-drawer"
+          aria-label="标签定义管理"
+          className="max-h-[70vh] overflow-y-auto border-b bg-background px-4 py-4"
+        >
+          <p className="mb-3 text-xs text-muted-foreground">
+            标签是<b>多选标注</b>，用来给工作项打交叉维度（如「重要」「本周」「等回复」），
+            <b>不会改变状态</b> —— 状态用左上角「状态管理」里的那一套。
+            归档是软删除：历史同步仍能回放，但不能再新选用。
+          </p>
+          <LabelDefinitionPanel
+            rows={definitions?.labels ?? []}
+            errorMessage={labelPanelError}
+            onCreate={(input) => runLabelAction(() => createLabel(input))}
+            onRename={(input) => runLabelAction(() => updateLabel(input))}
+            onArchive={(input) => runLabelAction(() => archiveLabel(input))}
           />
         </section>
       ) : null}
