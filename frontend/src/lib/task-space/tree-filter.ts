@@ -19,12 +19,24 @@ export interface WorkItemTreeFilter {
   status: TreeStatusFilter
   /** 只看被依赖阻塞的二级任务。 */
   blockedOnly: boolean
+  /**
+   * ★ P3（2026-10-04）：按标签筛选，**AND 语义**（须同时具备全部选中标签）。
+   *
+   * 为什么是 AND 而不是 OR：① 与本文件既有的 query / status / blockedOnly
+   * 是同一套「全部条件都要满足」的叠加口径，不一致会让用户以为是两套规则；
+   * ② 主流工具（Todoist / Jira）搜多标签都是 AND（"同时打 #A #B"）。
+   *
+   * 为什么**归档标签仍参与**匹配：归档是软删除，标签还挂在工作项上；
+   * 若归档后立刻筛不到，那些行就成了"有数据但捞不出来"的孤儿。
+   */
+  labelIds: string[]
 }
 
 export const EMPTY_TREE_FILTER: WorkItemTreeFilter = {
   query: '',
   status: 'all',
   blockedOnly: false,
+  labelIds: [],
 }
 
 export interface TreeFilterContext {
@@ -35,7 +47,12 @@ export interface TreeFilterContext {
 }
 
 export function isTreeFilterActive(filter: WorkItemTreeFilter): boolean {
-  return filter.query.trim() !== '' || filter.status !== 'all' || filter.blockedOnly
+  return (
+    filter.query.trim() !== '' ||
+    filter.status !== 'all' ||
+    filter.blockedOnly ||
+    filter.labelIds.length > 0
+  )
 }
 
 function matchesFilter(
@@ -55,6 +72,13 @@ function matchesFilter(
   }
   if (filter.status === 'completed' && category !== 'completed') return false
   if (filter.blockedOnly && context.isBlockedById[item.id] !== true) return false
+  // ★ P3：标签 AND 匹配。空数组时跳过（isTreeFilterActive 已保证不进这里）。
+  if (filter.labelIds.length > 0) {
+    const owned = new Set(item.labelIds ?? [])
+    for (const wanted of filter.labelIds) {
+      if (!owned.has(wanted)) return false
+    }
+  }
   return true
 }
 

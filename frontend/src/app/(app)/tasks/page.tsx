@@ -553,6 +553,34 @@ export default function TasksPage() {
     })
   }, [workItems, selectedProjectId, treeFilter, blockedSignals, categoryById, hierarchyCodes])
   const treeFilterActive = isTreeFilterActive(treeFilter)
+  // ★ P3（2026-10-04）：标签筛选的可选项（与树 chip 同一份 definitions）。
+  //   **归档标签也列出来**（排最后）：归档是软删除，标签还挂在存量行上；
+  //   若筛选器隐藏它，用户一旦选中就再也取消不掉 —— 那是死局。
+  const filterableLabels = useMemo(() => {
+    const rows = definitions?.labels ?? []
+    const out: Array<{ id: string; name: string; color: string | null; archived: boolean }> = []
+    for (const raw of rows) {
+      const entry = raw as Record<string, unknown>
+      if (typeof entry.id !== 'string' || !entry.id) continue
+      let name = entry.id
+      for (const key of ['name', 'label', 'title'] as const) {
+        if (typeof entry[key] === 'string' && entry[key]) {
+          name = entry[key] as string
+          break
+        }
+      }
+      const archivedAt = entry.archivedAt ?? entry.archived_at
+      out.push({
+        id: entry.id,
+        name,
+        color: typeof entry.color === 'string' ? entry.color : null,
+        archived: archivedAt != null,
+      })
+    }
+    return out.sort(
+      (a, b) => Number(a.archived) - Number(b.archived) || a.name.localeCompare(b.name),
+    )
+  }, [definitions])
   // 父子完成护栏的前置信号：每个父项下未完成的直接子项数。
   const openChildCountById = useMemo(
     () => countOpenChildren(workItems, categoryById),
@@ -838,6 +866,60 @@ export default function TasksPage() {
                     只看被阻塞
                   </label>
                 </div>
+                {/* ★ P3（2026-10-04）：按标签筛选。
+                    AND 语义（与上面 query/status/blockedOnly 同一套叠加口径）——
+                    主流工具（Todoist/Jira）搜多标签也是"同时具备"。 */}
+                {filterableLabels.length > 0 ? (
+                  <div
+                    className="flex items-start gap-2"
+                    data-testid="label-filter-row"
+                  >
+                    <span className="shrink-0 pt-1 text-[10px] text-muted-foreground">
+                      按标签
+                    </span>
+                    <div className="flex min-w-0 flex-1 flex-wrap gap-1">
+                      {filterableLabels.map((label) => {
+                        const active = treeFilter.labelIds.includes(label.id)
+                        return (
+                          <button
+                            key={label.id}
+                            type="button"
+                            aria-pressed={active}
+                            data-testid={`label-filter-${label.id}`}
+                            title={
+                              label.archived
+                                ? `${label.name}（已归档 —— 仍可用于筛选存量行）`
+                                : label.name
+                            }
+                            onClick={() =>
+                              setTreeFilter((current) => ({
+                                ...current,
+                                labelIds: active
+                                  ? current.labelIds.filter((id) => id !== label.id)
+                                  : [...current.labelIds, label.id],
+                              }))
+                            }
+                            className={
+                              active
+                                ? 'rounded-full border px-2 py-0.5 text-[10px]'
+                                : label.archived
+                                  ? 'rounded-full border border-dashed px-2 py-0.5 text-[10px] text-muted-foreground'
+                                  : 'rounded-full border border-muted-foreground/30 px-2 py-0.5 text-[10px] text-muted-foreground'
+                            }
+                            style={
+                              active && label.color
+                                ? { borderColor: label.color, color: label.color }
+                                : undefined
+                            }
+                          >
+                            {label.name}
+                            {label.archived ? '·归档' : ''}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
                 {treeFilterActive ? (
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span data-filter-count>命中 {visibleItems.length} 项（含父级路径）</span>
