@@ -61,6 +61,60 @@ function definitionLabel(
   return id
 }
 
+/**
+ * ★ 2026-10-04（P3）：取一个工作项已应用的标签 chip（结构化，渲染交给调用方）。
+ *
+ * 为什么树上要显示：分配标签的 UI 在**详情面板**，那边有可移除的 chips；
+ * 但树是全局视角 —— 分配完在树上看不见，用户会以为没生效。
+ * 「入口存在但反馈不可见」和「没入口」一样是 discoverability 问题。
+ *
+ * 两条口径：
+ *   - **已归档的标签仍然显示**（淡化）：它可能还挂在工作项上，
+ *     静默消失会让人以为数据丢了（详情面板的 applied 也不过滤归档，保持一致）。
+ *   - `max` 截断：行内还有标题/type·status·priority/按钮，一行挤不下太多；
+ *     超出用「+N」表达，不静默丢。
+ */
+function itemLabelChips(
+  definitions: TaskSpaceDefinitions | null | undefined,
+  labelIds: readonly string[] | undefined,
+  max = 2,
+): Array<{ id: string; name: string; color: string | null; archived: boolean; overflow: number }> {
+  if (!labelIds || labelIds.length === 0) return []
+  const all = definitions?.labels
+  if (!all) return []
+  const chips: Array<{ id: string; name: string; color: string | null; archived: boolean; overflow: number }> = []
+  let overflow = 0
+  for (const labelId of labelIds) {
+    const entry = all.find((candidate) => (
+      typeof candidate.id === 'string' && candidate.id === labelId
+    ))
+    if (!entry) continue
+    if (chips.length >= max) {
+      overflow += 1
+      continue
+    }
+    let name = labelId
+    for (const key of ['name', 'label', 'title'] as const) {
+      if (typeof entry[key] === 'string' && entry[key]) {
+        name = entry[key] as string
+        break
+      }
+    }
+    const archivedAt = entry.archivedAt ?? entry.archived_at
+    chips.push({
+      id: labelId,
+      name,
+      color: typeof entry.color === 'string' ? entry.color : null,
+      archived: archivedAt != null,
+      overflow: 0,
+    })
+  }
+  if (overflow > 0 && chips.length > 0) {
+    chips[chips.length - 1].overflow = overflow
+  }
+  return chips
+}
+
 export function WorkItemTree({
   items,
   selectedId,
@@ -348,6 +402,26 @@ export function WorkItemTree({
               [definitionLabel(definitions, 'types', item.typeDefinitionId),
                 definitionLabel(definitions, 'statuses', item.statusDefinitionId),
                 item.priority ?? ''].filter(Boolean).join(' · '),
+            ),
+            // ★ P3（2026-10-04）：标签 chip。分配 UI 在详情面板，但树是全局
+            //   视角 —— 分配完在这里看不见，用户会以为没生效。
+            ...itemLabelChips(definitions, item.labelIds).map((chip) =>
+              createElement(
+                'span',
+                {
+                  key: `label-${chip.id}`,
+                  'data-testid': `tree-label-${chip.id}`,
+                  title: chip.archived ? `${chip.name}（已归档）` : chip.name,
+                  className: chip.archived
+                    ? 'ml-1 shrink-0 rounded-full border border-muted-foreground/30 px-1.5 text-[10px] text-muted-foreground line-through'
+                    : 'ml-1 shrink-0 rounded-full border px-1.5 text-[10px]',
+                  style:
+                    chip.color && !chip.archived
+                      ? { borderColor: chip.color, color: chip.color }
+                      : undefined,
+                },
+                chip.overflow > 0 ? `${chip.name} +${chip.overflow}` : chip.name,
+              ),
             ),
           ),
           level < 3

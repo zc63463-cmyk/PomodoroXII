@@ -446,3 +446,119 @@ describe('WorkItemTree blocking indicator', () => {
     expect(document.querySelector('[data-blocked-lock]')).toBeNull()
   })
 })
+
+/**
+ * ★ P3（2026-10-04）：标签 chip 在树上的可见性。
+ *
+ * 分配标签的 UI 在详情面板，但树是全局视角 —— 分配完在树上看不见，
+ * 用户会以为没生效。重点是几条**不该崩 / 不该骗人**的口径：
+ *   - 没有标签 ⇒ 一行都不渲染（不占位、不显示空 chip）；
+ *   - labelIds 里有 definitions 中查不到的 id ⇒ **不显示裸 id**
+ *     （显示 "lbl-999" 只会让用户以为系统里真有这么个标签）；
+ *   - 超过 2 个 ⇒ 末位显示「+N」，不静默丢；
+ *   - 已归档标签仍显示但划线淡化（它还挂在工作项上，静默消失像数据丢了）。
+ */
+describe('WorkItemTree · 标签 chip（P3）', () => {
+  const withLabels = (labels: unknown[]) => ({ statuses: [], types: [], labels })
+
+  it('★ 有标签时树上出现 chip（分配后要看得见）', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: ['lbl-a'] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: withLabels([{ id: 'lbl-a', name: '重要', color: '#dc2626' }]) as never,
+    }))
+    const chip = screen.getByTestId('tree-label-lbl-a')
+    expect(chip.textContent).toBe('重要')
+    expect(chip.getAttribute('title')).toBe('重要')
+  })
+
+  it('没有标签时一个 chip 都不渲染', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: [] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: withLabels([{ id: 'lbl-a', name: '重要' }]) as never,
+    }))
+    expect(document.querySelector('[data-testid^="tree-label-"]')).toBeNull()
+  })
+
+  it('★ definitions 里查不到的 id 不显示裸 id', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: ['lbl-missing'] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: withLabels([{ id: 'lbl-a', name: '重要' }]) as never,
+    }))
+    expect(screen.queryByTestId('tree-label-lbl-missing')).toBeNull()
+    expect(document.body.textContent).not.toContain('lbl-missing')
+  })
+
+  it('★ 超过 2 个时末位显示「+N」而不是静默丢掉', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: ['a', 'b', 'c', 'd'] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: withLabels([
+        { id: 'a', name: 'A' }, { id: 'b', name: 'B' },
+        { id: 'c', name: 'C' }, { id: 'd', name: 'D' },
+      ]) as never,
+    }))
+    expect(screen.getByTestId('tree-label-a')).toBeTruthy()
+    expect(screen.getByTestId('tree-label-b')).toBeTruthy()
+    expect(screen.queryByTestId('tree-label-c')).toBeNull()
+    expect(screen.getByTestId('tree-label-b').textContent).toBe('B +2')
+  })
+
+  it('★ 已归档标签仍显示但淡化（还挂在工作项上，不能静默消失）', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: ['old'] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: withLabels([
+        { id: 'old', name: '旧标签', archivedAt: '2026-10-04T01:00:00.000Z' },
+      ]) as never,
+    }))
+    const chip = screen.getByTestId('tree-label-old')
+    expect(chip.textContent).toContain('旧标签')
+    expect(chip.getAttribute('title')).toContain('已归档')
+    expect(chip.className).toContain('line-through')
+  })
+
+  it('★ 脏标签行（缺 name / name 为 null）不崩，也不显示 undefined', () => {
+    // 注意只给 2 个：max=2，第 3 个起会被计进 overflow（截断口径已由上一条钉死）
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: ['bad', 'nullish'] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: withLabels([
+        { id: 'bad' },
+        { id: 'nullish', name: null },
+      ]) as never,
+    }))
+    // 缺 name / name 为 null ⇒ 回落成 id 本身是可接受的，但不能是 "undefined" 或空
+    const bad = screen.getByTestId('tree-label-bad')
+    const nullish = screen.getByTestId('tree-label-nullish')
+    expect(bad.textContent).not.toContain('undefined')
+    expect(nullish.textContent).not.toContain('undefined')
+    expect(bad.textContent).toBe('bad')
+    expect(nullish.textContent).toBe('nullish')
+  })
+
+  it('definitions 整个为 null 时不崩（labels 分支要能扛脏输入）', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1, { labelIds: ['lbl-a'] })],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      definitions: null,
+    }))
+    expect(screen.queryByTestId('tree-label-lbl-a')).toBeNull()
+  })
+})
