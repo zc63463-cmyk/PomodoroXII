@@ -1201,6 +1201,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/relations/dependency-graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Dependency Graph
+         * @description 以工作项为锚的依赖闭包 → MindCanvas ``GraphJsonPayload``（ADR-0008 D19-b）。
+         *
+         *     ★ 纯读派生投影：不落库、不进同步账本、无任何写副作用 —— 依赖事实源只在
+         *       ``relations`` 表（红线 1）。
+         *     ★ 边方向归一为 **上游 blocker → 下游 blocked**（``direction="fwd"``；DB 规范行
+         *       是 from=被阻断方 / to=阻断方，投影时翻转端点）。在该方向下语义为真的 kind 是
+         *       ``blocks``（``A depends_on B`` ⟺ ``B blocks A``），declared 原文保留在
+         *       ``edge.metadata.declaredAs``。
+         *     ★ ``relates_to`` 不参与阻塞（D12），不入图；已解除确认（``resolution`` 非空）
+         *       的边视为「不再需要」，不入图。
+         *     ★ ``indices.in_degree`` 为标准入度（= 该节点的上游 blocker 数）：入度 0 的
+         *       源头母材由前端 ``graphJsonToMindmap`` 升格为森林中心；拓扑序用 Kahn 算法，
+         *       带环时残留节点按 id 稳定追加在末尾并标 ``metadata.isCyclic``。
+         *     ★ 闭包防御：双向 BFS 波数 ≤ ``max_depth``、节点数 ≤ ``MAX_GRAPH_NODES``。
+         */
+        get: operations["get_dependency_graph_api_v1_relations_dependency_graph_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/relations/{relation_id}": {
         parameters: {
             query?: never;
@@ -1498,6 +1531,92 @@ export interface paths {
         get: operations["stats_schedule_summary_api_v1_stats_schedule_summary_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/status-definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Status Definition
+         * @description Create a status definition under an existing (fixed-axis) category.
+         */
+        post: operations["create_status_definition_api_v1_status_definitions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/status-definitions/{status_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Status Definition
+         * @description Update mutable fields of a status definition.
+         */
+        patch: operations["update_status_definition_api_v1_status_definitions__status_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/status-definitions/{status_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Status Definition
+         * @description Archive a status definition.
+         *
+         *     Rejected when work items still reference it (the compiler enforces it);
+         *     archiving a live status would leave those items pointing at an
+         *     archived row and the label would vanish from their UI.
+         */
+        post: operations["archive_status_definition_api_v1_status_definitions__status_id__archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/status-definitions/{status_id}/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reorder Status Definition
+         * @description Move a status to a target position **within its own category**.
+         *
+         *     ★ 不带 expected_version：这是集合级操作，逐行 CAS 会让并发 reorder 互相打架。
+         */
+        post: operations["reorder_status_definition_api_v1_status_definitions__status_id__reorder_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2005,6 +2124,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/work-items/{work_item_id}/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reorder Work Item
+         * @description Reposition a work item within its own parent (sibling reorder).
+         *
+         *     ★ 集合级操作：rank 是「去掉自己之后」的兄弟序列插入位次，兄弟行的
+         *       child_rank 由服务端一并重写为 0..n-1。parent_id 是 authority guard
+         *       （必须等于当前父项）；换父仍走 POST /{work_item_id}/move。
+         */
+        post: operations["reorder_work_item_api_v1_work_items__work_item_id__reorder_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/work-items/{work_item_id}/restore": {
         parameters: {
             query?: never;
@@ -2059,6 +2202,32 @@ export interface paths {
          * @description Soft-delete a work item (server-stamped ``archived_at``).
          */
         post: operations["trash_work_item_api_v1_work_items__work_item_id__trash_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-maps/{work_item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Work Map
+         * @description 读取工作导图原文；不存在返回 404（语义 = 这份导图还没有）。
+         */
+        get: operations["get_work_map_api_v1_work_maps__work_item_id__get"];
+        /**
+         * Put Work Map
+         * @description 保存工作导图原文（整份覆盖，原子写）。
+         *
+         *     前端每次建岛后回写整份 ``.mm.md``；后端不做 diff、不解析。
+         */
+        put: operations["put_work_map_api_v1_work_maps__work_item_id__put"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2252,6 +2421,17 @@ export interface components {
         };
         /** ArchiveLabelRequest */
         ArchiveLabelRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** ArchiveStatusDefinitionRequest */
+        ArchiveStatusDefinitionRequest: {
             /** Commandid */
             commandId: string;
             /** Expectedversion */
@@ -2491,6 +2671,8 @@ export interface components {
             commandId: string;
             /** Description */
             description?: string | null;
+            /** Dueat */
+            dueAt?: string | null;
             /** Expectedversion */
             expectedVersion: number;
             /**
@@ -2656,6 +2838,23 @@ export interface components {
             spaceId: string;
             /** Toworkitemid */
             toWorkItemId: string;
+        };
+        /** CreateStatusDefinitionRequest */
+        CreateStatusDefinitionRequest: {
+            /** Category */
+            category: string;
+            /** Color */
+            color?: string | null;
+            /** Commandid */
+            commandId: string;
+            /** Icon */
+            icon?: string | null;
+            /** Name */
+            name: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
         };
         /** CreateWorkItemRequest */
         CreateWorkItemRequest: {
@@ -3017,6 +3216,85 @@ export interface components {
             name?: string | null;
             /** Parent Id */
             parent_id?: string | null;
+        };
+        /**
+         * GraphJsonEdge
+         * @description One blocking edge, normalized upstream → downstream.
+         */
+        GraphJsonEdge: {
+            /**
+             * Direction
+             * @default fwd
+             */
+            direction: string;
+            /** From */
+            from: string;
+            /** Kind */
+            kind: string;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** To */
+            to: string;
+        };
+        /**
+         * GraphJsonIndices
+         * @description Kernel adapter 的森林中心判据：入度 0 = 无上游 blocker 的源头母材。
+         */
+        GraphJsonIndices: {
+            /** In Degree */
+            in_degree?: {
+                [key: string]: number;
+            };
+            /** Topological Order */
+            topological_order?: string[];
+        };
+        /**
+         * GraphJsonNode
+         * @description One work item in the dependency closure.
+         */
+        GraphJsonNode: {
+            /** File Path */
+            file_path?: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @default work_item
+             */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Level */
+            level?: string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * GraphJsonPayload
+         * @description MindCanvas ``GraphJsonPayload`` 契约（前端 ``graphJsonToMindmap`` 直接消费）。
+         */
+        GraphJsonPayload: {
+            /**
+             * Domain
+             * @default task_space
+             */
+            domain: string;
+            /** Edges */
+            edges: components["schemas"]["GraphJsonEdge"][];
+            indices: components["schemas"]["GraphJsonIndices"];
+            /** Nodes */
+            nodes: components["schemas"]["GraphJsonNode"][];
+            /** Source Hash */
+            source_hash: string;
+            /**
+             * Version
+             * @default 1.0.0
+             */
+            version: string;
         };
         /**
          * HabitCheckInCreate
@@ -4214,6 +4492,53 @@ export interface components {
             labelIds: string[];
             /** Payloadhash */
             payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /**
+         * ReorderStatusDefinitionRequest
+         * @description Move within its own category.
+         *
+         *     ★ 刻意**没有** expected_version：集合级操作，逐行 CAS 会让并发 reorder
+         *       互相打架（见 compiler 的 _compile_ReorderStatusDefinition 注释）。
+         */
+        ReorderStatusDefinitionRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Rank */
+            rank: number;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /**
+         * ReorderWorkItemRequest
+         * @description Reposition a work item **within its own parent** (sibling reorder).
+         *
+         *     ★ 为什么是独立命令而不是给 MoveWorkItem 加 child_rank：Move 的
+         *       ``extra="forbid"`` + 拒收 childRank 是有意设计 —— 它保护「在线 Move 的
+         *       rank 由服务端权威分配（append-only）」这一不变量。往 Move 里塞 rank 等
+         *       于推翻该不变量。先例：``ReorderStatusDefinitionRequest`` +
+         *       ``POST /{status_id}/reorder`` —— 同样为「用户期望组内拖动」而生。
+         *     ★ rank 语义与状态 reorder 一致：在**去掉自己之后**的同父兄弟序列中的插入
+         *       位次（服务端 clamp 到 ``[0, len(rest)]``）。重排是集合级操作，兄弟行的
+         *       child_rank 一并由服务端重写为 0..n-1；客户端永远不上行 rank 绝对值之外的
+         *       任何兄弟行状态。
+         *     ★ parent_id 是 authority guard（必须等于当前父项，None = 根层），换父请走
+         *       MoveWorkItem（那里有环 / 深度 / 跨项目全套树校验）。
+         */
+        ReorderWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Parentid */
+            parentId?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Rank */
+            rank: number;
             /** Spaceid */
             spaceId: string;
         };
@@ -5422,12 +5747,33 @@ export interface components {
             /** Spaceid */
             spaceId: string;
         };
+        /** UpdateStatusDefinitionRequest */
+        UpdateStatusDefinitionRequest: {
+            /** Category */
+            category?: string | null;
+            /** Color */
+            color?: string | null;
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Icon */
+            icon?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /** UpdateWorkItemRequest */
         UpdateWorkItemRequest: {
             /** Commandid */
             commandId: string;
             /** Description */
             description?: string | null;
+            /** Dueat */
+            dueAt?: string | null;
             /** Expectedversion */
             expectedVersion: number;
             /** Payloadhash */
@@ -5560,6 +5906,8 @@ export interface components {
             description: string | null;
             /** Displaykey */
             displayKey: string;
+            /** Dueat */
+            dueAt?: string | null;
             /** Effortactualseconds */
             effortActualSeconds: number;
             /** Effortestimatelowerseconds */
@@ -8399,6 +8747,42 @@ export interface operations {
             };
         };
     };
+    get_dependency_graph_api_v1_relations_dependency_graph_get: {
+        parameters: {
+            query: {
+                workItemId: string;
+                max_depth?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphJsonPayload"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
     remove_relation_api_v1_relations__relation_id__delete: {
         parameters: {
             query?: never;
@@ -9036,6 +9420,168 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScheduleSummaryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_status_definition_api_v1_status_definitions_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateStatusDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_status_definition_api_v1_status_definitions__status_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                status_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateStatusDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    archive_status_definition_api_v1_status_definitions__status_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                status_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArchiveStatusDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    reorder_status_definition_api_v1_status_definitions__status_id__reorder_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                status_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderStatusDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -10176,6 +10722,47 @@ export interface operations {
             };
         };
     };
+    reorder_work_item_api_v1_work_items__work_item_id__reorder_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
     restore_work_item_api_v1_work_items__work_item_id__restore_post: {
         parameters: {
             query?: never;
@@ -10282,6 +10869,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_work_map_api_v1_work_maps__work_item_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    put_work_map_api_v1_work_maps__work_item_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "text/plain": string;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Domain or request validation error */
