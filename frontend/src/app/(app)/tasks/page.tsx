@@ -148,17 +148,21 @@ export default function TasksPage() {
   const updateLabel = useTaskSpaceStore((state) => state.updateLabel)
   const archiveLabel = useTaskSpaceStore((state) => state.archiveLabel)
 
-  // 同 runStatusAction：把 store 映射好的 message 透给面板，不静默吞掉
+  // 同 runStatusAction：把 **映射后**的 message 透给面板，不静默吞掉
   // 409 label_name_conflict（标签名空间内唯一）—— 用户需要知道为什么没建成功。
+  //
+  // ★ 2026-10-04 修正：原先写的是 `error instanceof Error ? error.message : ...`，
+  //   那会把 **Axios 原文** 直接漏到 UI 上（实测用户看到
+  //   "Request failed with status code 500"）。违反本仓「错误文案必须闭合」纪律。
+  //   正确做法是复用 store 的映射：500 这类无 canonical body 的会落到
+  //   GENERIC_MUTATION_ERROR「操作失败，请稍后重试。」，与页面顶部的说法一致。
   const runLabelAction = useCallback(
     async (action: () => Promise<unknown>) => {
       try {
         setLabelPanelError(null)
         await action()
       } catch (error) {
-        setLabelPanelError(
-          error instanceof Error ? error.message : '标签操作失败，请稍后重试',
-        )
+        setLabelPanelError(resolveTaskSpaceMutationError(error).message)
       }
     },
     [],
@@ -173,9 +177,9 @@ export default function TasksPage() {
         setStatusPanelError(null)
         await action()
       } catch (error) {
-        setStatusPanelError(
-          error instanceof Error ? error.message : '状态操作失败，请稍后重试',
-        )
+        // ★ 2026-10-04 修正：同 runLabelAction —— 原先透出 `error.message`，
+        //   会把 Axios 原文（"Request failed with status code 500"）漏给用户。
+        setStatusPanelError(resolveTaskSpaceMutationError(error).message)
       }
     },
     [],
