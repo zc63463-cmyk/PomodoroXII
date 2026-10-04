@@ -1,7 +1,5 @@
 'use client'
 
-import { createElement, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-
 import { createElement, Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
@@ -404,6 +402,7 @@ export default function TimerPage() {
   const activeSessionMode = ((session as { sessionType?: SessionMode } | null)?.sessionType ?? 'work') as SessionMode
   const endedSessionMode = ((aggregate?.session as { sessionType?: SessionMode } | undefined)?.sessionType ?? activeSessionMode) as SessionMode
   const runningBreak = isBreakMode(activeSessionMode)
+
   // ── 导图端口「当前会话岛」（ADR-0008 D13 步 1）────────────────────────────
   // 数据 = 当前投入 L3 的 `.mm.md` 原文。刷新时机有两条，缺一不可：
   //   ① 会话 / 当前 L3 / 休息态变化 → 重读；
@@ -464,6 +463,7 @@ export default function TimerPage() {
       })
     return () => { cancelled = true }
   }, [activeSessionId, focusedWorkItemId, mapRefreshSeq, plans, runningBreak])
+
   // ── 结束态「岛总览」数据（ADR-0008 D13 步 3-4b）────────────────────────────
   // 键 = 结束会话的 **focused plan item** 的 L3。页面 `plans` 派生自 `aggregate.plan`
   // （过滤 removedAt），`currentPlan` 即"本会话聚焦项"、无标记时回退 plans[0] ——
@@ -489,6 +489,7 @@ export default function TimerPage() {
       })
     return () => { cancelled = true }
   }, [endedMapWorkItemId])
+
   // ── 复盘提炼（PXII-FEAT-REVIEW-HARVEST）─────────────────────────────────────
   // 「本会话岛里的思考」是**读侧派生**：不新增任何表/字段，每次直接从已加载的
   // `endedMapText` 现算（纯函数见 lib/work-map/harvest-thoughts，fail-soft）。
@@ -503,6 +504,7 @@ export default function TimerPage() {
   // 覆盖掉 —— 故写成功后由本地基线接管。会话切换时清账。
   const [harvestNoteBase, setHarvestNoteBase] = useState<string | null>(null)
   useEffect(() => { setHarvestNoteBase(null) }, [reviewSession?.sessionId])
+
   // ── 准备态「主图」弹层数据（ADR-0008 D18 / D13 步 3-4a，方案 C）─────────────
   // **懒读**：只有弹层**打开时**才读该三级项的导图（准备态不做无谓请求）；
   // 打开过一次即缓存（`previewFor` 记住已加载/已尝试的 L3），**切换三级项时清空重读**。
@@ -542,6 +544,7 @@ export default function TimerPage() {
         )
       })
   }, [previewOpen, previewWorkItemId])
+
   /**
    * 快速记录（ADR-0008 D13 步 2）：把一条思路按类型追加为会话节点子节点。
    *
@@ -562,6 +565,7 @@ export default function TimerPage() {
     setSessionMap({ workItemId: focusedWorkItemId, text: result.text })
     setFocusCid(null)
   }
+
   /**
    * 拆解后的导图生长（2026-10-01）：为新 L3 的 `.mm.md` 建**本次会话的岛**，
    * 并把新项写成岛内的一个 `todo` 节点。
@@ -591,6 +595,7 @@ export default function TimerPage() {
         .filter((title) => title.trim() !== '')
       const allTitles = Array.from(new Set([...siblingTitles, planTitle]))
       const startedAt = new Date(aggregate?.session.startedAt ?? '')
+
       let baseText = existing
       if (!hasSessionIsland(baseText, activeSessionId)) {
         const island = buildSessionIsland(baseText, {
@@ -606,6 +611,7 @@ export default function TimerPage() {
           baseText = island.text
         }
       }
+
       const synced = syncPlanItemsToSessionIsland(baseText, {
         sessionId: activeSessionId,
         planTitles: allTitles,
@@ -626,6 +632,7 @@ export default function TimerPage() {
       return null
     }
   }
+
   /**
    * 方案 A（保持在原图生长，不自动切换）：
    * 把拆解出的新三级计划项，作为会话岛下的一级子分支（### <标题>），直接追加到**当前正在查看的导图**上。
@@ -640,9 +647,11 @@ export default function TimerPage() {
       const existing = (sessionMap?.workItemId === currentId && sessionMap.text !== null
         ? sessionMap.text
         : await readWorkMap(currentId)) ?? ''
+
       const currentItem = workItems.find((w) => w.id === currentId)
       const currentTitle = currentItem?.title ?? '当前工作项'
       const startedAt = new Date(aggregate?.session.startedAt ?? '')
+
       let baseText = existing
       if (!hasSessionIsland(baseText, activeSessionId)) {
         const siblingTitles = plans
@@ -661,6 +670,7 @@ export default function TimerPage() {
           baseText = island.text
         }
       }
+
       const synced = syncPlanItemsToSessionIsland(baseText, {
         sessionId: activeSessionId,
         planTitles: [planTitle],
@@ -668,6 +678,7 @@ export default function TimerPage() {
       if (!synced.changed) {
         return null
       }
+
       await writeWorkMap(currentId, synced.text)
       setSessionMap({ workItemId: currentId, text: synced.text })
       return synced.text
@@ -678,6 +689,7 @@ export default function TimerPage() {
       return null
     }
   }
+
   /**
    * 节点编辑（ADR-0008 D16 / D13 步 3-2）：改名 / 加子 / 类型 / 注释 / 删除。
    *
@@ -698,6 +710,7 @@ export default function TimerPage() {
     setSessionMap({ workItemId: focusedWorkItemId, text: result.text })
     setFocusCid(null)
   }
+
   /**
    * 节点升格为任务（PXII-FEAT-TASK-SPACE-P0 P0-1）：把会话岛内的思考节点沉淀为
    * 正式 WorkItem，并在导图上回写任务编号。
@@ -749,6 +762,7 @@ export default function TimerPage() {
     await writeWorkMap(mapWorkItemId, renamed.text)
     setSessionMap({ workItemId: mapWorkItemId, text: renamed.text })
   }
+
   /**
    * 节奏面板只在「已结束 且 不需要复盘」时出现：
    * - 休息型结束（免复盘）→ 立即出现；
@@ -833,8 +847,6 @@ export default function TimerPage() {
     }
     let cancelled = false
     void focusRepository.listCached().then(async (sessions) => {
-      if (!cancelled) setCompletedWorkSessions(countCompletedWorkSessions(sessions))
-
       if (!cancelled) {
         setCompletedWorkSessions(countCompletedWorkSessions(sessions))
         // 「最近会话」卡片消费同一批行（组件侧只取今日前 3 条，见 timer-side-today）。
@@ -1425,25 +1437,6 @@ export default function TimerPage() {
     // ② 不需复盘（休息型结束 / 投入型复盘已完成）→ 休息节奏面板：
     //    建议下一步（短休/长休/下一个番茄），可自动开始，出口仍可回任务页。
     ? (reviewSession
-      ? createElement(SessionReview, {
-        session: aggregate.session,
-        plans,
-        outcomes: aggregate.outcomes,
-        envelopes: aggregate.commandEnvelopes,
-        receipts: aggregate.commandReceipts as never,
-        draft: reviewDraft,
-        readOnly: !reviewSession,
-        // ★ 2026-09-11：只在复盘完成态（readOnly = 无待复盘项）渲染出口；待复盘
-        // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
-        //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
-        onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
-        onDraftChange: updateReviewDraft,
-        onSubmit: submitReview,
-        onReconcile: reconcileCommand,
-        onAbandon: abandonCommand,
-      })
-      : createElement('div', { className: 'grid gap-6 p-6' },
-
       // 焦点区 = 复盘面板 + **下方**「岛总览」（D12 裁决 3 / D13 步 3-4b）；
       // 总览**只读**：不传 onEdit/onQuickRecord（编辑入口仅运行态有，D16-a）。
       ? createElement(TimerFrame, { focus: createElement(Fragment, null,
@@ -1501,17 +1494,6 @@ export default function TimerPage() {
               type: 'button', variant: 'outline', onClick: handleReturnToTasks,
             }, '回任务页'),
           ),
-        createElement(TodaySummary),
-      ))
-    : aggregate && session && clock ? createElement('div', {
-      className: 'grid gap-6 p-6',
-      // 沉浸模式（工单 B）：渐隐作用域由这个属性驱动（见 globals.css 的 timer 块）。
-      'data-immersive': immersive ? 'true' : 'false',
-    },
-    createElement('div', { className: 'flex items-center justify-between gap-3' },
-      // 二级归属（可选步）：查不到工作项就留空，交给右侧按钮独占行。
-      level2WorkItem
-
         ),
         side: createElement(TodaySummary),
       }))
@@ -1525,29 +1507,6 @@ export default function TimerPage() {
             'data-testid': 'focus-context',
           }, `${level2WorkItem.displayKey} ${level2WorkItem.title}`)
         : null,
-      // 沉浸开关：永远可见可点 —— 「退出沉浸」绝不能被自己的渐隐规则吃掉。
-      // 这是结构保证（按钮不在 .timer-immersive-region 内），不是样式巧合。
-      createElement(Button, {
-        type: 'button', variant: 'ghost', size: 'sm',
-        'aria-pressed': immersive,
-        onClick: () => setImmersive((value) => !value),
-      }, immersive ? '退出沉浸' : '沉浸模式'),
-    ),
-    createElement(SessionClock, {
-      session, nowMs, owner: ownershipMode === 'owner',
-      ownerHint,
-      onTakeover: ownershipMode === 'read_only' ? takeOverSession : undefined,
-      onPause: (occurredAt) => clockAction('pause', occurredAt),
-      onResume: (occurredAt) => clockAction('resume', occurredAt),
-      onEnd: (occurredAt) => clockAction('end', occurredAt),
-      onFlushNote: async () => { await draftController?.flush('before-append') },
-    }),
-    // 次级内容区：沉浸时整体渐隐（opacity-20 + pointer-events-none，见 globals.css）。
-    createElement('div', {
-      className: 'timer-immersive-region grid gap-6',
-      'data-testid': 'immersive-region',
-    },
-
       actions: createElement(Fragment, null,
         // ★ PXII-FEAT-TIMER-CHIME：通知授权 + 试听入口放在顶栏动作区（永不渐隐）。
         //   只在运行态出现 —— 这是到点会真正消费通知的那个状态，也是用户唯一
@@ -1599,12 +1558,6 @@ export default function TimerPage() {
       // 休息不承接三级计划、不产生投入（服务端对 plan 行 fail-closed），
       // 这里用一句说明代替，避免出现"点了必被拒"的控件。
       runningBreak
-        ? createElement('p', {
-            className: 'text-sm text-muted-foreground',
-            'data-testid': 'break-session-note',
-          }, `${modeLabel(activeSessionMode)}不记录三级成果与投入 —— 只保留休息时长；结束后直接进入下一轮节奏。`)
-        : createElement(SessionWorkspace, {
-
         ? createElement('div', { className: 'timer-immersive-fade' },
           createElement('p', {
             className: 'text-sm text-muted-foreground',
@@ -1633,12 +1586,6 @@ export default function TimerPage() {
                 await draftController?.flush('current-item-change')
               }
             },
-          }),
-      !runningBreak && focusedWorkItemId ? createElement(FocusedWorkItemNote, {
-        note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
-        draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
-      }) : null,
-
           })),
       // ── 导图小视图（ADR-0008 D15：端口职责拆分的"缩略 + 定位"一半）──────────
       // ★ 刻意**不加** .timer-immersive-fade：用户 2026-10-01 确认「极简岛 = 小视图
